@@ -663,6 +663,9 @@ class TransportAPI:
         If tracked_stops/tracked_routes are None, uses focus_stops and tracks all routes at those stops.
         """
         self._delay_db_path = db_path or os.environ.get("DELAY_DB_PATH", "delay_history.db")
+        db_dir = os.path.dirname(self._delay_db_path)
+        if db_dir:
+            os.makedirs(db_dir, exist_ok=True)
         self._tracked_stops = set(tracked_stops or self.gtfs.focus_stops or [])
         self._tracked_routes = set(tracked_routes) if tracked_routes else None
         conn = sqlite3.connect(self._delay_db_path)
@@ -783,6 +786,127 @@ class TransportAPI:
         rows = conn.execute(query, params).fetchall()
         conn.close()
         return [dict(row) for row in rows]
+
+    def get_delay_pattern_summary(
+        self, stop_id=None, route_id=None, days=30, weekday=None, hour=None
+    ):
+        """
+        Get delay summary bucketed by weekday and hour.
+        Weekday uses Monday=0 through Sunday=6.
+        """
+        if not hasattr(self, "_delay_db_path"):
+            raise RuntimeError("Call init_delay_tracking() first")
+        weekday_expr = "((CAST(strftime('%w', recorded_at) AS INTEGER) + 6) % 7)"
+        hour_expr = "CAST(strftime('%H', recorded_at) AS INTEGER)"
+        since = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S")
+        query = f"""
+            SELECT route_id, route_short_name, stop_id,
+                   {weekday_expr} as weekday,
+                   {hour_expr} as hour,
+                   COUNT(*) as sample_count,
+                   ROUND(AVG(delay_seconds), 1) as avg_delay,
+                   MAX(delay_seconds) as max_delay,
+                   MIN(delay_seconds) as min_delay
+            FROM delay_records
+            WHERE recorded_at >= ?
+        """
+        params: list = [since]
+        if stop_id:
+            query += " AND stop_id = ?"
+            params.append(stop_id)
+        if route_id:
+            query += " AND route_id = ?"
+            params.append(route_id)
+        if weekday is not None:
+            query += f" AND {weekday_expr} = ?"
+            params.append(weekday)
+        if hour is not None:
+            query += f" AND {hour_expr} = ?"
+            params.append(hour)
+        query += f" GROUP BY route_id, route_short_name, stop_id, {weekday_expr}, {hour_expr}"
+        query += " ORDER BY stop_id, route_short_name, weekday, hour"
+        conn = sqlite3.connect(self._delay_db_path)
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(query, params).fetchall()
+        conn.close()
+        return [dict(row) for row in rows]
+
+    def get_delay_estimate(self, stop_id, route_id, days=90, weekday=None, hour=None, min_samples=5):
+        """
+        Estimate expected delay using historical buckets with fallback.
+        Prefers exact weekday/hour, then weekday, then overall route+stop history.
+        Weekday uses Monday=0 through Sunday=6.
+        """
+        if not hasattr(self, "_delay_db_path"):
+            raise RuntimeError("Call init_delay_tracking() first")
+        target_weekday = datetime.now().weekday() if weekday is None else weekday
+        target_hour = datetime.now().hour if hour is None else hour
+        since = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S")
+        weekday_expr = "((CAST(strftime('%w', recorded_at) AS INTEGER) + 6) % 7)"
+
+        exact_matches = self.get_delay_pattern_summary(
+            stop_id=stop_id,
+            route_id=route_id,
+            days=days,
+            weekday=target_weekday,
+            hour=target_hour,
+        )
+        if exact_matches and exact_matches[0]["sample_count"] >= min_samples:
+            result = exact_matches[0]
+            result["bucket_type"] = "weekday_hour"
+            result["target_weekday"] = target_weekday
+            result["target_hour"] = target_hour
+            return result
+
+        conn = sqlite3.connect(self._delay_db_path)
+        conn.row_factory = sqlite3.Row
+
+        weekday_row = conn.execute(
+            f"""
+            SELECT route_id, route_short_name, stop_id,
+                   COUNT(*) as sample_count,
+                   ROUND(AVG(delay_seconds), 1) as avg_delay,
+                   MAX(delay_seconds) as max_delay,
+                   MIN(delay_seconds) as min_delay
+            FROM delay_records
+            WHERE recorded_at >= ? AND stop_id = ? AND route_id = ? AND {weekday_expr} = ?
+            GROUP BY route_id, route_short_name, stop_id
+            """,
+            [since, stop_id, route_id, target_weekday],
+        ).fetchone()
+        if weekday_row and weekday_row["sample_count"] >= min_samples:
+            result = dict(weekday_row)
+            result["weekday"] = target_weekday
+            result["hour"] = None
+            result["bucket_type"] = "weekday"
+            result["target_weekday"] = target_weekday
+            result["target_hour"] = target_hour
+            conn.close()
+            return result
+
+        overall_row = conn.execute(
+            """
+            SELECT route_id, route_short_name, stop_id,
+                   COUNT(*) as sample_count,
+                   ROUND(AVG(delay_seconds), 1) as avg_delay,
+                   MAX(delay_seconds) as max_delay,
+                   MIN(delay_seconds) as min_delay
+            FROM delay_records
+            WHERE recorded_at >= ? AND stop_id = ? AND route_id = ?
+            GROUP BY route_id, route_short_name, stop_id
+            """,
+            [since, stop_id, route_id],
+        ).fetchone()
+        conn.close()
+        if overall_row:
+            result = dict(overall_row)
+            result["weekday"] = None
+            result["hour"] = None
+            result["bucket_type"] = "overall"
+            result["target_weekday"] = target_weekday
+            result["target_hour"] = target_hour
+            return result
+        return None
 
     def purge_old_delays(self, keep_days=30):
         """Remove delay records older than keep_days to control storage size."""

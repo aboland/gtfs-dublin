@@ -8,6 +8,7 @@ This document describes how to set up and operationalise historical delay tracki
 
 The delay tracking system periodically snapshots real-time delay data from the NTA GTFS-RT feed and stores it in SQLite. This enables:
 - Historical delay analysis per route and stop
+- Delay analysis by weekday and hour of day
 - Average/max delay statistics over configurable time windows
 - Trend detection for commute planning
 - Data for Home Assistant sensors showing delay patterns
@@ -38,8 +39,8 @@ DELAY_TRACKED_ROUTES=
 # How often to record delays in seconds (default: 300 = 5 minutes)
 DELAY_RECORD_INTERVAL=300
 
-# How many days of history to keep (default: 30)
-DELAY_KEEP_DAYS=30
+# How many days of history to keep (default: 90)
+DELAY_KEEP_DAYS=90
 ```
 
 ### Docker Volume
@@ -100,6 +101,8 @@ Once tracking is enabled:
 |---|---|
 | `GET /delays/history?stop_id=...&route_id=...&days=7&limit=500` | Raw delay records |
 | `GET /delays/summary?stop_id=...&route_id=...&days=7` | Aggregated delay stats |
+| `GET /delays/patterns?stop_id=...&route=15&days=90` | Delay stats bucketed by weekday and hour |
+| `GET /delays/estimate?stop_id=...&route=15` | Historical delay estimate with weekday/hour fallback |
 
 ---
 

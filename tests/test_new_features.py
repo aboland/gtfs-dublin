@@ -1,6 +1,7 @@
 """Tests for stop search and delay tracking."""
 
 import sqlite3
+from datetime import datetime, timedelta
 
 import pytest
 
@@ -166,6 +167,94 @@ class TestDelayTracking:
         history = api.get_delay_history(route_id="R1", days=30)
         assert len(history) == 1
         assert history[0]["route_id"] == "R1"
+
+    def test_delay_pattern_summary(self, api, tmp_path):
+        db_path = str(tmp_path / "test_delays.db")
+        api.init_delay_tracking(db_path=db_path, tracked_stops=["S100"])
+        now = datetime.now().replace(minute=0, second=0, microsecond=0)
+        monday_8 = now - timedelta(days=now.weekday())
+        monday_8 = monday_8.replace(hour=8)
+        monday_9 = monday_8.replace(hour=9)
+        conn = sqlite3.connect(db_path)
+        conn.executemany(
+            "INSERT INTO delay_records (recorded_at, stop_id, route_id, route_short_name, trip_id, scheduled_time, delay_seconds) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            [
+                (monday_8.strftime("%Y-%m-%d %H:%M:%S"), "S100", "R1", "15", "T1", "08:00:00", 60),
+                ((monday_8 + timedelta(days=7)).strftime("%Y-%m-%d %H:%M:%S"), "S100", "R1", "15", "T2", "08:00:00", 180),
+                (monday_9.strftime("%Y-%m-%d %H:%M:%S"), "S100", "R1", "15", "T3", "09:00:00", 120),
+            ],
+        )
+        conn.commit()
+        conn.close()
+
+        summary = api.get_delay_pattern_summary(stop_id="S100", route_id="R1", days=30)
+
+        assert len(summary) == 2
+        exact_bucket = next(item for item in summary if item["hour"] == 8)
+        assert exact_bucket["weekday"] == monday_8.weekday()
+        assert exact_bucket["sample_count"] == 2
+        assert exact_bucket["avg_delay"] == 120.0
+
+    def test_delay_estimate_prefers_exact_bucket(self, api, tmp_path):
+        db_path = str(tmp_path / "test_delays.db")
+        api.init_delay_tracking(db_path=db_path, tracked_stops=["S100"])
+        now = datetime.now().replace(minute=0, second=0, microsecond=0)
+        monday_8 = now - timedelta(days=now.weekday())
+        monday_8 = monday_8.replace(hour=8)
+        conn = sqlite3.connect(db_path)
+        conn.executemany(
+            "INSERT INTO delay_records (recorded_at, stop_id, route_id, route_short_name, trip_id, scheduled_time, delay_seconds) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            [
+                (monday_8.strftime("%Y-%m-%d %H:%M:%S"), "S100", "R1", "15", "T1", "08:00:00", 60),
+                ((monday_8 + timedelta(days=7)).strftime("%Y-%m-%d %H:%M:%S"), "S100", "R1", "15", "T2", "08:00:00", 180),
+                ((monday_8 + timedelta(days=14)).strftime("%Y-%m-%d %H:%M:%S"), "S100", "R1", "15", "T3", "08:00:00", 120),
+            ],
+        )
+        conn.commit()
+        conn.close()
+
+        estimate = api.get_delay_estimate(
+            stop_id="S100",
+            route_id="R1",
+            days=30,
+            weekday=monday_8.weekday(),
+            hour=8,
+            min_samples=3,
+        )
+
+        assert estimate is not None
+        assert estimate["bucket_type"] == "weekday_hour"
+        assert estimate["avg_delay"] == 120.0
+
+    def test_delay_estimate_falls_back_to_overall(self, api, tmp_path):
+        db_path = str(tmp_path / "test_delays.db")
+        api.init_delay_tracking(db_path=db_path, tracked_stops=["S100"])
+        now = datetime.now().replace(minute=0, second=0, microsecond=0)
+        monday_8 = now - timedelta(days=now.weekday())
+        monday_8 = monday_8.replace(hour=8)
+        conn = sqlite3.connect(db_path)
+        conn.executemany(
+            "INSERT INTO delay_records (recorded_at, stop_id, route_id, route_short_name, trip_id, scheduled_time, delay_seconds) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            [
+                (monday_8.strftime("%Y-%m-%d %H:%M:%S"), "S100", "R1", "15", "T1", "08:00:00", 60),
+                ((monday_8 + timedelta(days=1)).strftime("%Y-%m-%d %H:%M:%S"), "S100", "R1", "15", "T2", "08:00:00", 180),
+            ],
+        )
+        conn.commit()
+        conn.close()
+
+        estimate = api.get_delay_estimate(
+            stop_id="S100",
+            route_id="R1",
+            days=30,
+            weekday=monday_8.weekday(),
+            hour=8,
+            min_samples=3,
+        )
+
+        assert estimate is not None
+        assert estimate["bucket_type"] == "overall"
+        assert estimate["avg_delay"] == 120.0
 
 
 class TestGetTranslatedText:

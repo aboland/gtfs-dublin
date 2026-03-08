@@ -103,6 +103,8 @@ docker compose up --build
 - `/stops/search?q=parnell` — Search stops by name, code, or ID
 - `/delays/history?stop_id=...&route_id=...&days=7` — Historical delay records (requires delay tracking enabled)
 - `/delays/summary?stop_id=...&days=7` — Average/max delay statistics
+- `/delays/patterns?stop_id=...&route=15&days=90` — Delay summaries bucketed by weekday and hour
+- `/delays/estimate?stop_id=...&route=15` — Current historical delay estimate using weekday/hour fallback
 - `/health` — Health check endpoint
 
 ### MCP Server
@@ -120,7 +122,14 @@ The MCP server provides AI-accessible tools for transport data:
 - `STOPS` — Comma-separated list of stop IDs to focus on (optional)
 - `GTFS_DIR` — Directory for GTFS files (default: `GTFS_Realtime`)
 - `DELAY_DB_PATH` — Path to SQLite database for delay tracking (default: `delay_history.db`)
+- `DELAY_TRACKING_ENABLED` — Enable background delay recording in the API server (`0`/`1`, default: `0`)
+- `DELAY_TRACKED_STOPS` — Comma-separated stop IDs to record delays for (defaults to `STOPS`)
+- `DELAY_TRACKED_ROUTES` — Optional comma-separated route IDs or route short names to track
+- `DELAY_RECORD_INTERVAL` — Snapshot interval in seconds for delay recording (default: `300`)
+- `DELAY_KEEP_DAYS` — Number of days of delay history to retain before purging (default: `90`)
 - `GTFS_SERVICE_ALERTS_URL` — Override the NTA service alerts endpoint (optional)
+
+Delay snapshots are configurable. The default is one snapshot every `300` seconds (5 minutes), controlled by `DELAY_RECORD_INTERVAL`.
 
 ## Development
 

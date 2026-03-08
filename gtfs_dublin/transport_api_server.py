@@ -1,10 +1,13 @@
+import asyncio
+import logging
 import os
+from contextlib import asynccontextmanager, suppress
 
 from fastapi import FastAPI, HTTPException, Query
 
 from gtfs_core import TransportAPI
 
-app = FastAPI()
+logger = logging.getLogger(__name__)
 
 
 # Read stops from environment variable (comma-separated)
@@ -13,11 +16,94 @@ def get_env_stops() -> list[str]:
     return [s.strip() for s in stops.split(",") if s.strip()]
 
 
+def get_env_list(name: str, default: str = "") -> list[str]:
+    value = os.getenv(name, default)
+    return [item.strip() for item in value.split(",") if item.strip()]
+
+
+def is_delay_tracking_enabled() -> bool:
+    return os.getenv("DELAY_TRACKING_ENABLED", "0").lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
 # Read API key from environment variable
 API_KEY = os.getenv("TRANSPORT_API_KEY", "")
 
 # Create TransportAPI instance with focus_stops from env
 api = TransportAPI(api_key=API_KEY, focus_stops=get_env_stops())
+
+
+def resolve_route_id(route_id: str | None = None, route: str | None = None) -> str | None:
+    if route_id:
+        return route_id
+    if route is None:
+        return None
+    for rid, name in api.route_short_name_lookup.items():
+        if name.lower() == route.lower():
+            return rid
+    raise HTTPException(status_code=404, detail=f"Route '{route}' not found")
+
+
+def resolve_tracked_routes(values: list[str]) -> list[str]:
+    resolved: list[str] = []
+    for value in values:
+        if value in api.route_short_name_lookup:
+            resolved.append(value)
+            continue
+        matched = next(
+            (rid for rid, name in api.route_short_name_lookup.items() if name.lower() == value.lower()),
+            None,
+        )
+        if matched:
+            resolved.append(matched)
+        else:
+            logger.warning("Ignoring unknown tracked route '%s'", value)
+    return resolved
+
+
+async def delay_record_loop(interval_seconds: int):
+    while True:
+        try:
+            count = api.record_delays()
+            logger.info("Recorded %d delay entries", count)
+        except Exception:
+            logger.exception("Error recording delays")
+        await asyncio.sleep(interval_seconds)
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    task: asyncio.Task | None = None
+    if is_delay_tracking_enabled():
+        tracked_stops = get_env_list("DELAY_TRACKED_STOPS", os.getenv("STOPS", ""))
+        tracked_routes = resolve_tracked_routes(get_env_list("DELAY_TRACKED_ROUTES"))
+        if tracked_stops:
+            api.init_delay_tracking(
+                db_path=os.getenv("DELAY_DB_PATH", "/app/data/delay_history.db"),
+                tracked_stops=tracked_stops,
+                tracked_routes=tracked_routes or None,
+            )
+            keep_days = int(os.getenv("DELAY_KEEP_DAYS", "90"))
+            api.purge_old_delays(keep_days=keep_days)
+            interval_seconds = int(os.getenv("DELAY_RECORD_INTERVAL", "300"))
+            if interval_seconds > 0:
+                task = asyncio.create_task(delay_record_loop(interval_seconds))
+        else:
+            logger.warning(
+                "Delay tracking was enabled but no tracked stops were configured"
+            )
+    yield
+    if task is not None:
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
+
+
+app = FastAPI(lifespan=lifespan)
 
 
 @app.get("/departures")
@@ -119,22 +205,79 @@ def search_stops(
 def delay_history(
     stop_id: str | None = Query(default=None, description="Filter by stop ID"),
     route_id: str | None = Query(default=None, description="Filter by route ID"),
+    route: str | None = Query(default=None, description="Filter by route short name"),
     days: int = Query(default=7, ge=1, le=90, description="Number of days to look back"),
     limit: int = Query(default=500, ge=1, le=5000, description="Max records"),
 ):
     """Get historical delay records for tracked stops/routes."""
     if not hasattr(api, "_delay_db_path"):
         raise HTTPException(status_code=404, detail="Delay tracking not enabled")
-    return api.get_delay_history(stop_id=stop_id, route_id=route_id, days=days, limit=limit)
+    resolved_route_id = resolve_route_id(route_id=route_id, route=route)
+    return api.get_delay_history(
+        stop_id=stop_id, route_id=resolved_route_id, days=days, limit=limit
+    )
 
 
 @app.get("/delays/summary")
 def delay_summary(
     stop_id: str | None = Query(default=None, description="Filter by stop ID"),
     route_id: str | None = Query(default=None, description="Filter by route ID"),
+    route: str | None = Query(default=None, description="Filter by route short name"),
     days: int = Query(default=7, ge=1, le=90, description="Number of days"),
 ):
     """Get average/max delay statistics for tracked stops/routes."""
     if not hasattr(api, "_delay_db_path"):
         raise HTTPException(status_code=404, detail="Delay tracking not enabled")
-    return api.get_delay_summary(stop_id=stop_id, route_id=route_id, days=days)
+    resolved_route_id = resolve_route_id(route_id=route_id, route=route)
+    return api.get_delay_summary(stop_id=stop_id, route_id=resolved_route_id, days=days)
+
+
+@app.get("/delays/patterns")
+def delay_patterns(
+    stop_id: str | None = Query(default=None, description="Filter by stop ID"),
+    route_id: str | None = Query(default=None, description="Filter by route ID"),
+    route: str | None = Query(default=None, description="Filter by route short name"),
+    days: int = Query(default=30, ge=1, le=365, description="Number of days"),
+    weekday: int | None = Query(default=None, ge=0, le=6, description="Weekday, Monday=0"),
+    hour: int | None = Query(default=None, ge=0, le=23, description="Hour of day (24h)"),
+):
+    """Get historical delay summaries bucketed by weekday and hour."""
+    if not hasattr(api, "_delay_db_path"):
+        raise HTTPException(status_code=404, detail="Delay tracking not enabled")
+    resolved_route_id = resolve_route_id(route_id=route_id, route=route)
+    return api.get_delay_pattern_summary(
+        stop_id=stop_id,
+        route_id=resolved_route_id,
+        days=days,
+        weekday=weekday,
+        hour=hour,
+    )
+
+
+@app.get("/delays/estimate")
+def delay_estimate(
+    stop_id: str = Query(description="Filter by stop ID"),
+    route_id: str | None = Query(default=None, description="Filter by route ID"),
+    route: str | None = Query(default=None, description="Route short name"),
+    days: int = Query(default=90, ge=1, le=365, description="Number of days"),
+    weekday: int | None = Query(default=None, ge=0, le=6, description="Weekday, Monday=0"),
+    hour: int | None = Query(default=None, ge=0, le=23, description="Hour of day (24h)"),
+    min_samples: int = Query(default=5, ge=1, le=100, description="Minimum samples before fallback"),
+):
+    """Estimate expected delay using weekday/hour history with fallback."""
+    if not hasattr(api, "_delay_db_path"):
+        raise HTTPException(status_code=404, detail="Delay tracking not enabled")
+    resolved_route_id = resolve_route_id(route_id=route_id, route=route)
+    if resolved_route_id is None:
+        raise HTTPException(status_code=400, detail="route or route_id is required")
+    result = api.get_delay_estimate(
+        stop_id=stop_id,
+        route_id=resolved_route_id,
+        days=days,
+        weekday=weekday,
+        hour=hour,
+        min_samples=min_samples,
+    )
+    if result is None:
+        raise HTTPException(status_code=404, detail="No historical delay data found")
+    return result

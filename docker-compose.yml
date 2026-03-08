@@ -17,10 +17,17 @@ services:
       - TRANSPORT_API_KEY=${TRANSPORT_API_KEY}
       - STOPS=${STOPS}
       - GTFS_DIR=/app/GTFS_Realtime
+      - DELAY_TRACKING_ENABLED=${DELAY_TRACKING_ENABLED:-0}
+      - DELAY_DB_PATH=${DELAY_DB_PATH:-/app/data/delay_history.db}
+      - DELAY_TRACKED_STOPS=${DELAY_TRACKED_STOPS:-}
+      - DELAY_TRACKED_ROUTES=${DELAY_TRACKED_ROUTES:-}
+      - DELAY_RECORD_INTERVAL=${DELAY_RECORD_INTERVAL:-300}
+      - DELAY_KEEP_DAYS=${DELAY_KEEP_DAYS:-90}
     ports:
       - "8000:8000"
     volumes:
       - gtfs-data:/app/GTFS_Realtime:ro
+      - delay-data:/app/data
     restart: unless-stopped
     depends_on:
       gtfs-data-init:
@@ -52,3 +59,4 @@ services:
 
 volumes:
   gtfs-data:
+  delay-data:
