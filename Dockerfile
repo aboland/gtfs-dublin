@@ -41,9 +41,11 @@ RUN git lfs install --system && \
         exit 1; \
     fi && \
     if grep -q "oid sha256" GTFS_Realtime/stop_times.txt 2>/dev/null; then \
-        echo "ERROR: stop_times.txt contains LFS pointer instead of data"; \
-        exit 1; \
+        echo "ERROR: stop_times.txt contains LFS pointer instead of data - downloading fresh data"; \
+        python3 update_gtfs.py && echo "Emergency GTFS download completed"; \
     fi && \
+    echo "Checking file contents..." && \
+    head -5 GTFS_Realtime/stop_times.txt && \
     echo "GTFS data verification passed"
 
 # Install the projects
