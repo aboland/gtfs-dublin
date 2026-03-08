@@ -105,6 +105,14 @@ template:
 
 For a route-by-route template file, use the `live` attribute directly rather than `states(...) | from_json`. That avoids startup errors when the source sensor is still `unknown`.
 
+Combined departures also expose a derived `timing_status` field with values:
+
+- `live`: countdown is based on real-time prediction data
+- `scheduled_fallback`: trip is present in the real-time feed, but the countdown fell back to the timetable
+- `schedule_only`: no matching real-time trip was available, so the entry comes from the timetable only
+
+When vehicle position data is available, departures also include `vehicle_seconds_since_update`, which is the age of the latest vehicle position in seconds.
+
 Example `templates.yaml`:
 
 ```yaml
@@ -131,6 +139,26 @@ Example `templates.yaml`:
           {% set buses = state_attr('sensor.bus_stop_live_info', 'live') or [] %}
           {% set s4_buses = buses | selectattr('route_short_name', 'eq', 'S4') | sort(attribute='time_left') | list %}
           {{ s4_buses[0].source if s4_buses | length > 0 else 'N/A' }}
+
+Optional friendlier attributes using the additive fields:
+
+```yaml
+- sensor:
+    - name: "Next S4 Bus 1"
+      attributes:
+        timing_status: >
+          {% set buses = state_attr('sensor.bus_stop_live_info', 'live') or [] %}
+          {% set s4_buses = buses | selectattr('route_short_name', 'eq', 'S4') | sort(attribute='time_left') | list %}
+          {{ s4_buses[0].timing_status if s4_buses | length > 0 else 'N/A' }}
+        last_vehicle_update: >
+          {% set buses = state_attr('sensor.bus_stop_live_info', 'live') or [] %}
+          {% set s4_buses = buses | selectattr('route_short_name', 'eq', 'S4') | sort(attribute='time_left') | list %}
+          {% if s4_buses | length > 0 and s4_buses[0].vehicle_seconds_since_update is not none %}
+            {{ s4_buses[0].vehicle_seconds_since_update }}s ago
+          {% else %}
+            N/A
+          {% endif %}
+```
 
     - name: "Next S4 Bus 2"
       state: >

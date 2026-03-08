@@ -105,6 +105,12 @@ class TestGTFSDataLoaderParsing:
         assert ("T1", "S100") in loader.departure_lookup
         assert ("T1", "S200") not in loader.departure_lookup
 
+    def test_empty_focus_stops_behaves_like_no_filter(self, gtfs_dir):
+        loader = GTFSDataLoader(gtfs_dir, focus_stops=[])
+        assert "S100" in loader.stop_times_by_stop
+        assert "S200" in loader.stop_times_by_stop
+        assert loader.departure_lookup[("T1", "S200")] == "08:15:00"
+
     def test_missing_file_raises(self, tmp_path):
         # Empty directory — no GTFS files
         with pytest.raises(GTFSDataError):
@@ -112,6 +118,39 @@ class TestGTFSDataLoaderParsing:
 
 
 class TestGTFSDataLoaderEdgeCases:
+    def test_focus_stops_prunes_trip_and_calendar_indexes(self, tmp_path):
+        (tmp_path / "trips.txt").write_text(
+            "route_id,service_id,trip_id,trip_headsign,trip_short_name\n"
+            "R1,S1,T1,City Centre,15\n"
+            "R2,S2,T2,Airport,16A\n"
+        )
+        (tmp_path / "routes.txt").write_text(
+            "route_id,route_short_name,route_long_name\n"
+            "R1,15,Route 15\n"
+            "R2,16A,Route 16A\n"
+        )
+        (tmp_path / "stops.txt").write_text(
+            "stop_id,stop_code,stop_name,stop_lat,stop_lon\n"
+            "S100,1234,Main Street,53.3498,-6.2603\n"
+            "S200,5678,Airport Terminal,53.4264,-6.2499\n"
+        )
+        (tmp_path / "stop_times.txt").write_text(
+            "trip_id,arrival_time,departure_time,stop_id,stop_sequence\n"
+            "T1,08:00:00,08:00:00,S100,1\n"
+            "T2,09:00:00,09:00:00,S200,1\n"
+        )
+        (tmp_path / "calendar.txt").write_text(
+            "service_id,monday,tuesday,wednesday,thursday,friday,saturday,sunday,start_date,end_date\n"
+            "S1,1,1,1,1,1,0,0,20240101,20261231\n"
+            "S2,1,1,1,1,1,0,0,20240101,20261231\n"
+        )
+
+        loader = GTFSDataLoader(str(tmp_path), focus_stops=["S100"])
+
+        assert set(loader.trip_info_lookup) == {"T1"}
+        assert set(loader.calendar_lookup) == {"S1"}
+        assert set(loader.trip_service_lookup.values()) == {"S1"}
+
     def test_empty_trip_headsign(self, tmp_path):
         (tmp_path / "trips.txt").write_text(
             "route_id,service_id,trip_id,trip_headsign,trip_short_name\n"

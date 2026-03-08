@@ -77,6 +77,13 @@ class TransportAPI:
             return True
         return -window_past <= seconds_until <= window_future
 
+    def _get_timing_status(self, source, used_scheduled_time):
+        if source == "schedule":
+            return "schedule_only"
+        if used_scheduled_time:
+            return "scheduled_fallback"
+        return "live"
+
     def _haversine_distance(self, lat1, lon1, lat2, lon2):
         """Calculate the great-circle distance between two points on the Earth (in meters)."""
         from math import atan2, cos, radians, sin, sqrt
@@ -606,6 +613,9 @@ class TransportAPI:
                     else:
                         dep["used_scheduled_time"] = False
                     dep["source"] = "realtime"
+                    dep["timing_status"] = self._get_timing_status(
+                        dep["source"], dep["used_scheduled_time"]
+                    )
                     if "vehicle_distance_to_stop_m" not in dep:
                         dep["vehicle_distance_to_stop_m"] = None
                     if "vehicle_seconds_since_update" not in dep:
@@ -616,6 +626,9 @@ class TransportAPI:
                     dep["source"] = "schedule"
                     dep["time_left"] = dep.get("seconds_until")
                     dep["used_scheduled_time"] = True
+                    dep["timing_status"] = self._get_timing_status(
+                        dep["source"], dep["used_scheduled_time"]
+                    )
                     dep["vehicle_distance_to_stop_m"] = None
                     dep["vehicle_seconds_since_update"] = None
                     all_entries.append(dep)
@@ -632,6 +645,9 @@ class TransportAPI:
                         dep2["used_scheduled_time"] = True
                     else:
                         dep2["used_scheduled_time"] = False
+                    dep2["timing_status"] = self._get_timing_status(
+                        dep2["source"], dep2["used_scheduled_time"]
+                    )
                     all_entries.append(dep2)
         # Sort all entries by time_left
         all_entries.sort(

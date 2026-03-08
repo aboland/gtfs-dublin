@@ -92,6 +92,7 @@ class CombinedDeparture(BaseModel):
     arrival_str: str
     source: str
     used_scheduled_time: bool
+    timing_status: str
     vehicle: VehicleInfo | None = None
     vehicle_distance_to_stop_m: float | None = None
     vehicle_seconds_since_update: int | None = None

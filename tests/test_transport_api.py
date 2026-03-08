@@ -238,3 +238,113 @@ class TestRealtimeWindowFiltering:
 
         assert len(result["live"]) == 1
         assert result["live"][0]["time_left"] == -2 * 60
+        assert result["live"][0]["timing_status"] == "live"
+
+
+class TestTimingStatus:
+    def setup_method(self):
+        self.api = _make_api()
+        self.api.stop_info_lookup = {
+            "S1": {"stop_code": "1234", "stop_name": "Main Street"}
+        }
+
+    def test_helper_returns_live_for_realtime_predictions(self):
+        assert self.api._get_timing_status("realtime", False) == "live"
+
+    def test_helper_returns_scheduled_fallback_for_realtime_without_eta(self):
+        assert self.api._get_timing_status("realtime", True) == "scheduled_fallback"
+
+    def test_helper_returns_schedule_only_for_timetable_entries(self):
+        assert self.api._get_timing_status("schedule", True) == "schedule_only"
+
+    def test_marks_schedule_only_entries_in_combined_output(self):
+        self.api.get_departures_for_stops = lambda stop_ids, use_stop_code=False: []
+        self.api.get_scheduled_times_for_route_stop = (
+            lambda stop_id, use_stop_code=False: [
+                {
+                    "trip_id": "T1",
+                    "route_id": "R1",
+                    "route_short_name": "15",
+                    "service_id": "SVC1",
+                    "trip_headsign": "City Centre",
+                    "trip_short_name": "15",
+                    "arrival_time": (datetime.now() + timedelta(minutes=5)).strftime("%H:%M:%S"),
+                    "departure_time": (datetime.now() + timedelta(minutes=5)).strftime("%H:%M:%S"),
+                    "stop_sequence": 1,
+                    "calendar": {
+                        "monday": "1",
+                        "tuesday": "1",
+                        "wednesday": "1",
+                        "thursday": "1",
+                        "friday": "1",
+                        "saturday": "1",
+                        "sunday": "1",
+                        "start_date": "20240101",
+                        "end_date": "20261231",
+                    },
+                }
+            ]
+        )
+
+        result = self.api.get_combined_departures_and_schedule(["S1"])
+
+        assert len(result["live"]) == 1
+        assert result["live"][0]["source"] == "schedule"
+        assert result["live"][0]["timing_status"] == "schedule_only"
+
+    def test_marks_scheduled_fallback_for_realtime_trip_without_prediction(self):
+        self.api.get_departures_for_stops = lambda stop_ids, use_stop_code=False: [
+            {
+                "trip_id": "T1",
+                "stop_id": "S1",
+                "route_id": "R1",
+                "route_short_name": "15",
+                "trip_headsign": "City Centre",
+                "service_id": "SVC1",
+                "stop_sequence": 1,
+                "stop_name": "Main Street",
+                "stop_lat": "53.3498",
+                "stop_lon": "-6.2603",
+                "scheduled_departure_time": "",
+                "delay": None,
+                "expected_departure_time": None,
+                "time_left": None,
+                "start_time": "10:00:00",
+                "start_date": "20260308",
+                "schedule_relationship": "SCHEDULED",
+                "arrival_str": "2026-03-08 10:00:00",
+            }
+        ]
+        self.api.get_scheduled_times_for_route_stop = (
+            lambda stop_id, use_stop_code=False: [
+                {
+                    "trip_id": "T1",
+                    "route_id": "R1",
+                    "route_short_name": "15",
+                    "service_id": "SVC1",
+                    "trip_headsign": "City Centre",
+                    "trip_short_name": "15",
+                    "arrival_time": (datetime.now() + timedelta(minutes=5)).strftime("%H:%M:%S"),
+                    "departure_time": (datetime.now() + timedelta(minutes=5)).strftime("%H:%M:%S"),
+                    "stop_sequence": 1,
+                    "calendar": {
+                        "monday": "1",
+                        "tuesday": "1",
+                        "wednesday": "1",
+                        "thursday": "1",
+                        "friday": "1",
+                        "saturday": "1",
+                        "sunday": "1",
+                        "start_date": "20240101",
+                        "end_date": "20261231",
+                    },
+                }
+            ]
+        )
+
+        result = self.api.get_combined_departures_and_schedule(["S1"])
+
+        assert len(result["live"]) == 1
+        assert result["live"][0]["source"] == "realtime"
+        assert result["live"][0]["used_scheduled_time"] is True
+        assert result["live"][0]["timing_status"] == "scheduled_fallback"
