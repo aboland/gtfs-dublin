@@ -35,6 +35,16 @@ cd "$PROJECT_DIR"
 
 # Update GTFS data
 log "📥 Downloading latest GTFS data..."
+
+# Check if required packages are installed, install if needed
+if ! python3 -c "import requests, google.transit.gtfs_realtime_pb2" 2>/dev/null; then
+    log "📦 Installing required Python packages..."
+    pip3 install --user requests gtfs-realtime-bindings || {
+        log "❌ Failed to install required packages"
+        exit 1
+    }
+fi
+
 python3 update_gtfs.py >> "$LOG_FILE" 2>&1
 
 log "✅ GTFS data updated successfully"
