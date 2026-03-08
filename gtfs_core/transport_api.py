@@ -84,6 +84,14 @@ class TransportAPI:
             return "scheduled_fallback"
         return "live"
 
+    def _is_cancelled_realtime_departure(
+        self, stop_schedule_relationship, trip_schedule_relationship
+    ):
+        return stop_schedule_relationship == "SKIPPED" or trip_schedule_relationship in {
+            "CANCELED",
+            "DELETED",
+        }
+
     def _haversine_distance(self, lat1, lon1, lat2, lon2):
         """Calculate the great-circle distance between two points on the Earth (in meters)."""
         from math import atan2, cos, radians, sin, sqrt
@@ -203,6 +211,9 @@ class TransportAPI:
                 "https://api.nationaltransport.ie/gtfsr/v2/ServiceAlerts",
             )
             response = self.session.get(url, headers=self.headers, timeout=self.request_timeout)
+            if response.status_code == 404:
+                logger.warning("Service alerts feed unavailable at %s; returning no alerts.", url)
+                return []
             response.raise_for_status()
             feed.ParseFromString(response.content)
             alerts = []
@@ -348,9 +359,22 @@ class TransportAPI:
         departures = []
         for entity in feed.entity:
             if entity.HasField("trip_update"):
+                trip = entity.trip_update.trip
+                trip_schedule_relationship = (
+                    gtfs_realtime_pb2.TripDescriptor.ScheduleRelationship.Name(
+                        trip.schedule_relationship
+                    )
+                )
                 for stu in entity.trip_update.stop_time_update:
                     if stu.stop_id in stop_ids:
-                        trip = entity.trip_update.trip
+                        stop_schedule_relationship = gtfs_realtime_pb2.TripUpdate.StopTimeUpdate.ScheduleRelationship.Name(
+                            stu.schedule_relationship
+                        )
+                        if self._is_cancelled_realtime_departure(
+                            stop_schedule_relationship,
+                            trip_schedule_relationship,
+                        ):
+                            continue
                         key = (trip.trip_id, trip.route_id)
                         dept_key = (trip.trip_id, stu.stop_id)
                         scheduled_departure_time = self.departure_lookup.get(
@@ -410,9 +434,7 @@ class TransportAPI:
                             "time_left": seconds_left,
                             "start_time": trip.start_time,
                             "start_date": trip.start_date,
-                            "schedule_relationship": gtfs_realtime_pb2.TripUpdate.StopTimeUpdate.ScheduleRelationship.Name(
-                                stu.schedule_relationship
-                            ),
+                            "schedule_relationship": stop_schedule_relationship,
                             "arrival_str": arrival_str,
                         }
                         # Add vehicle info if available

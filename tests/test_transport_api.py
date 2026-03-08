@@ -1,6 +1,9 @@
 """Tests for TransportAPI utility methods and schedule filtering."""
 
 from datetime import datetime, timedelta
+from unittest.mock import Mock
+
+import requests
 
 
 def _make_api():
@@ -240,6 +243,33 @@ class TestRealtimeWindowFiltering:
         assert result["live"][0]["time_left"] == -2 * 60
         assert result["live"][0]["timing_status"] == "live"
 
+    def test_excludes_skipped_realtime_departure(self):
+        self.api.get_departures_for_stops = lambda stop_ids, use_stop_code=False: [
+            {
+                "trip_id": "T1",
+                "stop_id": "S1",
+                "route_id": "R1",
+                "route_short_name": "15",
+                "time_left": 60,
+                "expected_departure_time": "10:00:00",
+                "schedule_relationship": "SKIPPED",
+            }
+        ]
+        self.api.get_scheduled_times_for_route_stop = (
+            lambda stop_id, use_stop_code=False: []
+        )
+
+        filtered = [
+            dep
+            for dep in self.api.get_departures_for_stops(["S1"])
+            if not self.api._is_cancelled_realtime_departure(
+                dep.get("schedule_relationship"),
+                dep.get("trip_schedule_relationship"),
+            )
+        ]
+
+        assert filtered == []
+
 
 class TestTimingStatus:
     def setup_method(self):
@@ -348,3 +378,53 @@ class TestTimingStatus:
         assert result["live"][0]["source"] == "realtime"
         assert result["live"][0]["used_scheduled_time"] is True
         assert result["live"][0]["timing_status"] == "scheduled_fallback"
+
+
+class TestRealtimeCancellationFiltering:
+    def setup_method(self):
+        self.api = _make_api()
+
+    def test_helper_flags_skipped_stop_update(self):
+        assert self.api._is_cancelled_realtime_departure("SKIPPED", "SCHEDULED") is True
+
+    def test_helper_flags_canceled_trip(self):
+        assert self.api._is_cancelled_realtime_departure("SCHEDULED", "CANCELED") is True
+
+    def test_helper_keeps_normal_realtime_trip(self):
+        assert self.api._is_cancelled_realtime_departure("SCHEDULED", "SCHEDULED") is False
+
+
+class TestServiceAlertsFallback:
+    def setup_method(self):
+        self.api = _make_api()
+        self.api.headers = {}
+        self.api.request_timeout = 5
+        self.api.session = Mock()
+        self.api.route_short_name_lookup = {}
+        self.api.stop_info_lookup = {}
+
+    def test_returns_empty_alerts_when_feed_is_missing(self):
+        response = Mock()
+        response.status_code = 404
+        response.raise_for_status = Mock()
+        self.api.session.get.return_value = response
+
+        alerts = self.api._fetch_service_alerts()
+
+        assert alerts == []
+        response.raise_for_status.assert_not_called()
+
+    def test_raises_for_other_alert_feed_errors(self):
+        response = Mock()
+        response.status_code = 500
+        response.raise_for_status.side_effect = requests.exceptions.HTTPError(
+            "boom", response=response
+        )
+        self.api.session.get.return_value = response
+
+        try:
+            self.api._fetch_service_alerts()
+        except RuntimeError as exc:
+            assert "Fetch failed" in str(exc)
+        else:
+            raise AssertionError("Expected RuntimeError for non-404 alerts failure")
