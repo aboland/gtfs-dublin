@@ -36,16 +36,24 @@ cd "$PROJECT_DIR"
 # Update GTFS data
 log "📥 Downloading latest GTFS data..."
 
-# Check if required packages are installed, install if needed
-if ! python3 -c "import requests, google.transit.gtfs_realtime_pb2" 2>/dev/null; then
-    log "📦 Installing required Python packages..."
-    pip3 install --user requests gtfs-realtime-bindings || {
-        log "❌ Failed to install required packages"
-        exit 1
-    }
+# Run update in a temporary container with write access to GTFS data
+if docker-compose ps transport-api | grep -q "Up"; then
+    # If container is running, use its image
+    IMAGE_NAME=$(docker inspect $(docker-compose ps -q transport-api) --format='{{.Config.Image}}')
+else
+    # If container is not running, build it first
+    log "🏗️ Building transport-api container..."
+    docker-compose build transport-api >> "$LOG_FILE" 2>&1
+    IMAGE_NAME="gtfs-dublin_transport-api"
 fi
 
-python3 update_gtfs.py >> "$LOG_FILE" 2>&1
+docker run --rm \
+  -v "$PROJECT_DIR:/app" \
+  -w /app \
+  -e TRANSPORT_API_KEY="${TRANSPORT_API_KEY:-}" \
+  --entrypoint python3 \
+  "$IMAGE_NAME" \
+  update_gtfs.py >> "$LOG_FILE" 2>&1
 
 log "✅ GTFS data updated successfully"
 
