@@ -1,2 +1,3 @@
-feed_publisher_name,feed_publisher_url,feed_lang,feed_start_date,feed_end_date,feed_version,feed_contact_email
-National Transport Authority,https://www.nationaltransport.ie/,en,20260224,20270224,E65E2736-167E-4B9E-AEBF-7DCBC357DCF9,apisupport@nationaltransport.ie
+version https://git-lfs.github.com/spec/v1
+oid sha256:21ce1e0654df361bf608a110e69edf0ea4fe0e2d920fd1842349805567cc28da
+size 266
