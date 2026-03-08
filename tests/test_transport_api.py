@@ -191,3 +191,50 @@ class TestFilterScheduleByTimeWindow:
         )
         assert len(result) == 1
         assert result[0]["seconds_until"] > 0
+
+
+class TestRealtimeWindowFiltering:
+    def setup_method(self):
+        self.api = _make_api()
+        self.api.stop_info_lookup = {
+            "S1": {"stop_code": "1234", "stop_name": "Main Street"}
+        }
+
+    def test_excludes_stale_realtime_departure(self):
+        self.api.get_departures_for_stops = lambda stop_ids, use_stop_code=False: [
+            {
+                "trip_id": "T1",
+                "stop_id": "S1",
+                "route_id": "R1",
+                "route_short_name": "15",
+                "time_left": -25 * 60,
+                "expected_departure_time": "10:00:00",
+            }
+        ]
+        self.api.get_scheduled_times_for_route_stop = (
+            lambda stop_id, use_stop_code=False: []
+        )
+
+        result = self.api.get_combined_departures_and_schedule(["S1"])
+
+        assert result["live"] == []
+
+    def test_keeps_recent_realtime_departure_in_grace_window(self):
+        self.api.get_departures_for_stops = lambda stop_ids, use_stop_code=False: [
+            {
+                "trip_id": "T1",
+                "stop_id": "S1",
+                "route_id": "R1",
+                "route_short_name": "15",
+                "time_left": -2 * 60,
+                "expected_departure_time": "10:00:00",
+            }
+        ]
+        self.api.get_scheduled_times_for_route_stop = (
+            lambda stop_id, use_stop_code=False: []
+        )
+
+        result = self.api.get_combined_departures_and_schedule(["S1"])
+
+        assert len(result["live"]) == 1
+        assert result["live"][0]["time_left"] == -2 * 60

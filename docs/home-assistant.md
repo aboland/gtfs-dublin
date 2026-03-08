@@ -43,6 +43,23 @@ rest:
 
 Replace `<your-server-ip>` with the IP/hostname of the machine running the API, and update the stop IDs to your own.
 
+If you prefer the older `sensor:` style REST configuration, this is equivalent:
+
+```yaml
+sensor:
+  - platform: rest
+    name: Bus Stop Live Info
+    resource: http://<your-server-ip>:8000/departures?stops=8220DB002437,8220DB002438
+    method: GET
+    scan_interval: 60
+    json_attributes:
+      - timestamp
+      - live
+    value_template: "{{ value_json.timestamp }}"
+
+template: !include templates.yaml
+```
+
 ### 3. Create Template Sensors for Individual Stops
 
 To break out departures per stop, add template sensors:
@@ -85,6 +102,107 @@ template:
               {{ stop[0].expected_departure_time if stop else 'N/A' }}
             {% endif %}
 ```
+
+For a route-by-route template file, use the `live` attribute directly rather than `states(...) | from_json`. That avoids startup errors when the source sensor is still `unknown`.
+
+Example `templates.yaml`:
+
+```yaml
+- sensor:
+    - name: "Next S4 Bus 1"
+      state: >
+        {% set buses = state_attr('sensor.bus_stop_live_info', 'live') or [] %}
+        {% set s4_buses = buses | selectattr('route_short_name', 'eq', 'S4') | sort(attribute='time_left') | list %}
+        {% if s4_buses | length > 0 %}
+          {{ (s4_buses[0].time_left / 60) | round(0) | int }} min
+        {% else %}
+          N/A
+        {% endif %}
+      attributes:
+        due_time: >
+          {% set buses = state_attr('sensor.bus_stop_live_info', 'live') or [] %}
+          {% set s4_buses = buses | selectattr('route_short_name', 'eq', 'S4') | sort(attribute='time_left') | list %}
+          {{ s4_buses[0].expected_departure_time if s4_buses | length > 0 else 'N/A' }}
+        headsign: >
+          {% set buses = state_attr('sensor.bus_stop_live_info', 'live') or [] %}
+          {% set s4_buses = buses | selectattr('route_short_name', 'eq', 'S4') | sort(attribute='time_left') | list %}
+          {{ s4_buses[0].trip_headsign if s4_buses | length > 0 else 'N/A' }}
+        source: >
+          {% set buses = state_attr('sensor.bus_stop_live_info', 'live') or [] %}
+          {% set s4_buses = buses | selectattr('route_short_name', 'eq', 'S4') | sort(attribute='time_left') | list %}
+          {{ s4_buses[0].source if s4_buses | length > 0 else 'N/A' }}
+
+    - name: "Next S4 Bus 2"
+      state: >
+        {% set buses = state_attr('sensor.bus_stop_live_info', 'live') or [] %}
+        {% set s4_buses = buses | selectattr('route_short_name', 'eq', 'S4') | sort(attribute='time_left') | list %}
+        {% if s4_buses | length > 1 %}
+          {{ (s4_buses[1].time_left / 60) | round(0) | int }} min
+        {% else %}
+          N/A
+        {% endif %}
+      attributes:
+        due_time: >
+          {% set buses = state_attr('sensor.bus_stop_live_info', 'live') or [] %}
+          {% set s4_buses = buses | selectattr('route_short_name', 'eq', 'S4') | sort(attribute='time_left') | list %}
+          {{ s4_buses[1].expected_departure_time if s4_buses | length > 1 else 'N/A' }}
+        headsign: >
+          {% set buses = state_attr('sensor.bus_stop_live_info', 'live') or [] %}
+          {% set s4_buses = buses | selectattr('route_short_name', 'eq', 'S4') | sort(attribute='time_left') | list %}
+          {{ s4_buses[1].trip_headsign if s4_buses | length > 1 else 'N/A' }}
+        source: >
+          {% set buses = state_attr('sensor.bus_stop_live_info', 'live') or [] %}
+          {% set s4_buses = buses | selectattr('route_short_name', 'eq', 'S4') | sort(attribute='time_left') | list %}
+          {{ s4_buses[1].source if s4_buses | length > 1 else 'N/A' }}
+
+    - name: "Next 15A Bus 1"
+      state: >
+        {% set buses = state_attr('sensor.bus_stop_live_info', 'live') or [] %}
+        {% set buses_15a = buses | selectattr('route_short_name', 'eq', '15A') | sort(attribute='time_left') | list %}
+        {% if buses_15a | length > 0 %}
+          {{ (buses_15a[0].time_left / 60) | round(0) | int }} min
+        {% else %}
+          N/A
+        {% endif %}
+      attributes:
+        due_time: >
+          {% set buses = state_attr('sensor.bus_stop_live_info', 'live') or [] %}
+          {% set buses_15a = buses | selectattr('route_short_name', 'eq', '15A') | sort(attribute='time_left') | list %}
+          {{ buses_15a[0].expected_departure_time if buses_15a | length > 0 else 'N/A' }}
+        headsign: >
+          {% set buses = state_attr('sensor.bus_stop_live_info', 'live') or [] %}
+          {% set buses_15a = buses | selectattr('route_short_name', 'eq', '15A') | sort(attribute='time_left') | list %}
+          {{ buses_15a[0].trip_headsign if buses_15a | length > 0 else 'N/A' }}
+        source: >
+          {% set buses = state_attr('sensor.bus_stop_live_info', 'live') or [] %}
+          {% set buses_15a = buses | selectattr('route_short_name', 'eq', '15A') | sort(attribute='time_left') | list %}
+          {{ buses_15a[0].source if buses_15a | length > 0 else 'N/A' }}
+
+    - name: "Next 15A Bus 2"
+      state: >
+        {% set buses = state_attr('sensor.bus_stop_live_info', 'live') or [] %}
+        {% set buses_15a = buses | selectattr('route_short_name', 'eq', '15A') | sort(attribute='time_left') | list %}
+        {% if buses_15a | length > 1 %}
+          {{ (buses_15a[1].time_left / 60) | round(0) | int }} min
+        {% else %}
+          N/A
+        {% endif %}
+      attributes:
+        due_time: >
+          {% set buses = state_attr('sensor.bus_stop_live_info', 'live') or [] %}
+          {% set buses_15a = buses | selectattr('route_short_name', 'eq', '15A') | sort(attribute='time_left') | list %}
+          {{ buses_15a[1].expected_departure_time if buses_15a | length > 1 else 'N/A' }}
+        headsign: >
+          {% set buses = state_attr('sensor.bus_stop_live_info', 'live') or [] %}
+          {% set buses_15a = buses | selectattr('route_short_name', 'eq', '15A') | sort(attribute='time_left') | list %}
+          {{ buses_15a[1].trip_headsign if buses_15a | length > 1 else 'N/A' }}
+        source: >
+          {% set buses = state_attr('sensor.bus_stop_live_info', 'live') or [] %}
+          {% set buses_15a = buses | selectattr('route_short_name', 'eq', '15A') | sort(attribute='time_left') | list %}
+          {{ buses_15a[1].source if buses_15a | length > 1 else 'N/A' }}
+```
+
+Repeat the same pattern for other routes such as `F1`, `F2`, and `F3`.
 
 ### 4. Next N Departures for a Stop
 

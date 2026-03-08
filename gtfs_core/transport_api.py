@@ -72,6 +72,11 @@ class TransportAPI:
         sign = "-" if seconds < 0 else ""
         return f"{sign}{minutes}:{secs:02d}"
 
+    def _is_departure_within_window(self, seconds_until, window_past, window_future):
+        if seconds_until is None:
+            return True
+        return -window_past <= seconds_until <= window_future
+
     def _haversine_distance(self, lat1, lon1, lat2, lon2):
         """Calculate the great-circle distance between two points on the Earth (in meters)."""
         from math import atan2, cos, radians, sin, sqrt
@@ -550,7 +555,16 @@ class TransportAPI:
             stop_ids = stop_ids
 
         now = datetime.now()
-        realtime = self.get_departures_for_stops(stop_ids, use_stop_code=False)
+        window_past = 5 * 60
+        realtime = [
+            dep
+            for dep in self.get_departures_for_stops(stop_ids, use_stop_code=False)
+            if self._is_departure_within_window(
+                dep.get("time_left"),
+                window_past=window_past,
+                window_future=window_future,
+            )
+        ]
         rt_index = {(d["trip_id"], d["stop_id"]): d for d in realtime}
         all_entries = []
         for sid in stop_ids:
@@ -559,7 +573,7 @@ class TransportAPI:
             )
             filtered = self.filter_schedule_by_time_window(
                 schedule,
-                window_past=5 * 60,
+                window_past=window_past,
                 window_future=window_future,
                 reference_time=now,
             )
