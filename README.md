@@ -82,6 +82,11 @@ make up-mcp      # Run only the MCP server
 - `/departures?stops=STOP_ID1,STOP_ID2` — Get combined real-time and scheduled departures for given stop IDs
 - `/departures?stops=1234,5678&use_stop_code=true` — Same, but using the 4-digit codes displayed at physical bus stops
 - `/departures/route/{route_short_name}?stop=STOP_ID` — Get departures for a specific route (e.g. `15`, `16A`) at a stop
+- `/alerts` — Get active service alerts (disruptions, cancellations, detours)
+- `/alerts?route=15` — Alerts filtered by route short name
+- `/stops/search?q=parnell` — Search stops by name, code, or ID
+- `/delays/history?stop_id=...&route_id=...&days=7` — Historical delay records (requires delay tracking enabled)
+- `/delays/summary?stop_id=...&days=7` — Average/max delay statistics
 - `/health` — Health check endpoint
 
 ### MCP Server
@@ -91,11 +96,15 @@ The MCP server provides AI-accessible tools for transport data:
 - `get_departures_for_stops` — Get real-time departures
 - `get_scheduled_times_for_route_stop` — Get scheduled times
 - `get_combined_departures_and_schedule` — Combined real-time + scheduled data
+- `get_service_alerts` — Get active service alerts
+- `search_stops` — Search stops by name, code, or ID
 
 ### Environment Variables
 - `TRANSPORT_API_KEY` — Your API key for the National Transport API (required)
 - `STOPS` — Comma-separated list of stop IDs to focus on (optional)
 - `GTFS_DIR` — Directory for GTFS files (default: `GTFS_Realtime`)
+- `DELAY_DB_PATH` — Path to SQLite database for delay tracking (default: `delay_history.db`)
+- `GTFS_SERVICE_ALERTS_URL` — Override the NTA service alerts endpoint (optional)
 
 ## Development
 

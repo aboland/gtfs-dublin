@@ -290,6 +290,46 @@ def format_departures_output(
     return "\n".join(lines) if lines else "No departures found."
 
 
+@mcp.tool()
+def get_service_alerts(
+    route: str | None = Field(default=None, description="Route short name to filter by (e.g. '15', '16A')"),
+    stop_id: str | None = Field(default=None, description="Stop ID to filter by"),
+) -> list[dict]:
+    """
+    Get active service alerts (disruptions, cancellations, detours).
+    Optionally filter by route short name or stop ID.
+    """
+    try:
+        api = get_api()
+        route_id = None
+        if route:
+            for rid, name in api.route_short_name_lookup.items():
+                if name.lower() == route.lower():
+                    route_id = rid
+                    break
+        return api.get_service_alerts(route_id=route_id, stop_id=stop_id)
+    except Exception as e:
+        logger.exception("Error in get_service_alerts")
+        raise RuntimeError(f"Failed to get service alerts: {e}") from e
+
+
+@mcp.tool()
+def search_stops(
+    query: str = Field(description="Search query (stop name, code, or ID)"),
+    limit: int = Field(default=20, description="Maximum number of results"),
+) -> list[dict]:
+    """
+    Search for stops by name, stop code, or stop ID.
+    Returns matching stops with their IDs, names, codes, and coordinates.
+    """
+    try:
+        api = get_api()
+        return api.search_stops(query, limit=limit)
+    except Exception as e:
+        logger.exception("Error in search_stops")
+        raise RuntimeError(f"Failed to search stops: {e}") from e
+
+
 # --- MCP Resources ---
 
 

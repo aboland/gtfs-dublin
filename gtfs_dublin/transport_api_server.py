@@ -84,3 +84,57 @@ def departures_by_route(
 @app.get("/health")
 def health():
     return {"status": "ok"}
+
+
+@app.get("/alerts")
+def service_alerts(
+    route: str | None = Query(default=None, description="Filter by route short name"),
+    stop_id: str | None = Query(default=None, description="Filter by stop ID"),
+):
+    """Get active service alerts, optionally filtered by route or stop."""
+    route_id = None
+    if route:
+        for rid, name in api.route_short_name_lookup.items():
+            if name.lower() == route.lower():
+                route_id = rid
+                break
+        if route_id is None:
+            raise HTTPException(status_code=404, detail=f"Route '{route}' not found")
+    try:
+        return api.get_service_alerts(route_id=route_id, stop_id=stop_id)
+    except RuntimeError as e:
+        raise HTTPException(status_code=503, detail=str(e)) from e
+
+
+@app.get("/stops/search")
+def search_stops(
+    q: str = Query(description="Search query (stop name, code, or ID)"),
+    limit: int = Query(default=20, ge=1, le=100, description="Max results"),
+):
+    """Search for stops by name, stop code, or stop ID."""
+    return api.search_stops(q, limit=limit)
+
+
+@app.get("/delays/history")
+def delay_history(
+    stop_id: str | None = Query(default=None, description="Filter by stop ID"),
+    route_id: str | None = Query(default=None, description="Filter by route ID"),
+    days: int = Query(default=7, ge=1, le=90, description="Number of days to look back"),
+    limit: int = Query(default=500, ge=1, le=5000, description="Max records"),
+):
+    """Get historical delay records for tracked stops/routes."""
+    if not hasattr(api, "_delay_db_path"):
+        raise HTTPException(status_code=404, detail="Delay tracking not enabled")
+    return api.get_delay_history(stop_id=stop_id, route_id=route_id, days=days, limit=limit)
+
+
+@app.get("/delays/summary")
+def delay_summary(
+    stop_id: str | None = Query(default=None, description="Filter by stop ID"),
+    route_id: str | None = Query(default=None, description="Filter by route ID"),
+    days: int = Query(default=7, ge=1, le=90, description="Number of days"),
+):
+    """Get average/max delay statistics for tracked stops/routes."""
+    if not hasattr(api, "_delay_db_path"):
+        raise HTTPException(status_code=404, detail="Delay tracking not enabled")
+    return api.get_delay_summary(stop_id=stop_id, route_id=route_id, days=days)

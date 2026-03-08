@@ -1,4 +1,6 @@
+import logging
 import os
+import sqlite3
 from datetime import datetime, timedelta
 
 import requests
@@ -6,6 +8,8 @@ from google.transit import gtfs_realtime_pb2
 
 from .formatting import DeparturesFormatter
 from .gtfs_loader import GTFSDataError, GTFSDataLoader
+
+logger = logging.getLogger(__name__)
 
 
 class TransportAPI:
@@ -83,8 +87,6 @@ class TransportAPI:
     # --- GTFS Realtime Data Fetchers (with caching) ---
     def _cached_fetch(self, cache_attr, fetch_func, max_age_seconds=20):
         """Fetch data with time-based caching. Returns cached data if fresh (< max_age_seconds)."""
-        import logging
-
         now = datetime.now()
         cache = getattr(self, cache_attr, None)
         cache_time = getattr(self, f"{cache_attr}_time", None)
@@ -101,18 +103,18 @@ class TransportAPI:
             return data
         except requests.exceptions.HTTPError as e:
             status_code = getattr(e.response, "status_code", None)
-            logging.error(f"Cached fetch failed: {e}")
+            logger.error("Cached fetch failed: %s", e)
             if status_code == 429 and cache is not None:
-                logging.warning("Returning cached data due to rate limiting (429).")
+                logger.warning("Returning cached data due to rate limiting (429).")
                 return cache
             if cache is not None:
-                logging.warning("Returning cached data due to fetch failure.")
+                logger.warning("Returning cached data due to fetch failure.")
                 return cache
             raise RuntimeError(f"Fetch failed: {e}") from e
         except Exception as e:
-            logging.error(f"Cached fetch failed: {e}")
+            logger.error("Cached fetch failed: %s", e)
             if cache is not None:
-                logging.warning("Returning cached data due to fetch failure.")
+                logger.warning("Returning cached data due to fetch failure.")
                 return cache
             raise RuntimeError(f"Fetch failed: {e}") from e
 
@@ -181,6 +183,91 @@ class TransportAPI:
 
         return self._cached_fetch("_vehicle_positions_cache", fetch_func, max_age_seconds=20)
 
+    def _fetch_service_alerts(self):
+        def fetch_func():
+            feed = gtfs_realtime_pb2.FeedMessage()
+            url = os.environ.get(
+                "GTFS_SERVICE_ALERTS_URL",
+                "https://api.nationaltransport.ie/gtfsr/v2/ServiceAlerts",
+            )
+            response = self.session.get(url, headers=self.headers, timeout=self.request_timeout)
+            response.raise_for_status()
+            feed.ParseFromString(response.content)
+            alerts = []
+            for entity in feed.entity:
+                if entity.HasField("alert"):
+                    alert = entity.alert
+                    # Extract translated text (prefer English, fall back to first)
+                    header = self._get_translated_text(alert.header_text)
+                    description = self._get_translated_text(alert.description_text)
+                    url_text = self._get_translated_text(alert.url) if alert.HasField("url") else None
+                    # Active periods
+                    active_periods = []
+                    for period in alert.active_period:
+                        active_periods.append({
+                            "start": period.start if period.start else None,
+                            "end": period.end if period.end else None,
+                        })
+                    # Informed entities (affected routes/stops/agencies)
+                    informed = []
+                    for ie in alert.informed_entity:
+                        entry = {}
+                        if ie.agency_id:
+                            entry["agency_id"] = ie.agency_id
+                        if ie.route_id:
+                            entry["route_id"] = ie.route_id
+                            entry["route_short_name"] = self.route_short_name_lookup.get(ie.route_id, "")
+                        if ie.stop_id:
+                            entry["stop_id"] = ie.stop_id
+                            stop = self.stop_info_lookup.get(ie.stop_id, {})
+                            entry["stop_name"] = stop.get("stop_name", "")
+                        if ie.HasField("trip"):
+                            entry["trip_id"] = ie.trip.trip_id
+                        informed.append(entry)
+                    alerts.append({
+                        "id": entity.id,
+                        "header": header,
+                        "description": description,
+                        "url": url_text,
+                        "cause": gtfs_realtime_pb2.Alert.Cause.Name(alert.cause),
+                        "effect": gtfs_realtime_pb2.Alert.Effect.Name(alert.effect),
+                        "active_periods": active_periods,
+                        "informed_entities": informed,
+                    })
+            return alerts
+
+        return self._cached_fetch("_service_alerts_cache", fetch_func, max_age_seconds=120)
+
+    @staticmethod
+    def _get_translated_text(translated_string):
+        """Extract text from a GTFS-RT TranslatedString, preferring English."""
+        if not translated_string or not translated_string.translation:
+            return None
+        for t in translated_string.translation:
+            if t.language in ("en", "EN", ""):
+                return t.text
+        return translated_string.translation[0].text
+
+    # --- Service Alerts ---
+    def get_service_alerts(self, route_id=None, stop_id=None):
+        """
+        Get active service alerts. Optionally filter by route_id or stop_id.
+        Returns a list of alert dicts.
+        """
+        alerts = self._fetch_service_alerts()
+        if route_id is None and stop_id is None:
+            return alerts
+        filtered = []
+        for alert in alerts:
+            for ie in alert["informed_entities"]:
+                if route_id and ie.get("route_id") == route_id:
+                    filtered.append(alert)
+                    break
+                if stop_id and ie.get("stop_id") == stop_id:
+                    filtered.append(alert)
+                    break
+        return filtered
+
     # --- Vehicle Proximity Queries ---
     def get_vehicles_near_location(self, lat, lon, radius_m=100):
         """
@@ -210,6 +297,29 @@ class TransportAPI:
         lat = float(stop["stop_lat"])
         lon = float(stop["stop_lon"])
         return self.get_vehicles_near_location(lat, lon, radius_m)
+
+    # --- Stop Search ---
+    def search_stops(self, query, limit=20):
+        """
+        Search stops by name or stop code (case-insensitive substring match).
+        Returns a list of matching stop dicts with stop_id, stop_name, stop_code, stop_lat, stop_lon.
+        """
+        query_lower = query.lower()
+        results = []
+        for stop_id, info in self.stop_info_lookup.items():
+            name = info.get("stop_name", "").lower()
+            code = info.get("stop_code", "").lower()
+            if query_lower in name or query_lower in code or query_lower in stop_id.lower():
+                results.append({
+                    "stop_id": stop_id,
+                    "stop_name": info.get("stop_name", ""),
+                    "stop_code": info.get("stop_code", ""),
+                    "stop_lat": info.get("stop_lat", ""),
+                    "stop_lon": info.get("stop_lon", ""),
+                })
+                if len(results) >= limit:
+                    break
+        return results
 
     def get_departures_for_stops(self, stop_ids, use_stop_code=False):
         """
@@ -514,6 +624,152 @@ class TransportAPI:
             key=lambda d: (d.get("time_left") is None, d.get("time_left", float("inf")))
         )
         return {"timestamp": now.isoformat(), "live": all_entries}
+
+    # --- Historical Delay Tracking ---
+    def init_delay_tracking(self, db_path=None, tracked_stops=None, tracked_routes=None):
+        """
+        Initialize SQLite-based delay tracking.
+        Only records delays for the specified stops and/or routes to control storage size.
+        If tracked_stops/tracked_routes are None, uses focus_stops and tracks all routes at those stops.
+        """
+        self._delay_db_path = db_path or os.environ.get("DELAY_DB_PATH", "delay_history.db")
+        self._tracked_stops = set(tracked_stops or self.gtfs.focus_stops or [])
+        self._tracked_routes = set(tracked_routes) if tracked_routes else None
+        conn = sqlite3.connect(self._delay_db_path)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS delay_records (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                recorded_at TEXT NOT NULL,
+                stop_id TEXT NOT NULL,
+                route_id TEXT NOT NULL,
+                route_short_name TEXT,
+                trip_id TEXT NOT NULL,
+                scheduled_time TEXT,
+                delay_seconds INTEGER,
+                UNIQUE(recorded_at, stop_id, trip_id)
+            )
+        """)
+        conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_delay_stop_route
+            ON delay_records(stop_id, route_id, recorded_at)
+        """)
+        conn.commit()
+        conn.close()
+        logger.info(
+            "Delay tracking initialized: db=%s, stops=%s, routes=%s",
+            self._delay_db_path, self._tracked_stops, self._tracked_routes,
+        )
+
+    def record_delays(self):
+        """
+        Snapshot current delays for tracked stops/routes and store in SQLite.
+        Call this periodically (e.g. every few minutes) from a background task or cron.
+        """
+        if not hasattr(self, "_delay_db_path"):
+            raise RuntimeError("Call init_delay_tracking() first")
+        if not self._tracked_stops:
+            return 0
+        departures = self.get_departures_for_stops(list(self._tracked_stops))
+        now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        records = []
+        for dep in departures:
+            if dep.get("delay") is None:
+                continue
+            route_id = dep.get("route_id", "")
+            if self._tracked_routes and route_id not in self._tracked_routes:
+                continue
+            records.append((
+                now_str,
+                dep.get("stop_id", ""),
+                route_id,
+                dep.get("route_short_name", ""),
+                dep.get("trip_id", ""),
+                dep.get("scheduled_departure_time"),
+                dep.get("delay"),
+            ))
+        if not records:
+            return 0
+        conn = sqlite3.connect(self._delay_db_path)
+        conn.executemany(
+            "INSERT OR IGNORE INTO delay_records "
+            "(recorded_at, stop_id, route_id, route_short_name, trip_id, scheduled_time, delay_seconds) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            records,
+        )
+        conn.commit()
+        conn.close()
+        return len(records)
+
+    def get_delay_history(self, stop_id=None, route_id=None, days=7, limit=500):
+        """
+        Query historical delay records. Filter by stop_id and/or route_id.
+        Returns records from the last `days` days, up to `limit` rows.
+        """
+        if not hasattr(self, "_delay_db_path"):
+            raise RuntimeError("Call init_delay_tracking() first")
+        since = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S")
+        query = "SELECT recorded_at, stop_id, route_id, route_short_name, trip_id, scheduled_time, delay_seconds FROM delay_records WHERE recorded_at >= ?"
+        params: list = [since]
+        if stop_id:
+            query += " AND stop_id = ?"
+            params.append(stop_id)
+        if route_id:
+            query += " AND route_id = ?"
+            params.append(route_id)
+        query += " ORDER BY recorded_at DESC LIMIT ?"
+        params.append(limit)
+        conn = sqlite3.connect(self._delay_db_path)
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(query, params).fetchall()
+        conn.close()
+        return [dict(row) for row in rows]
+
+    def get_delay_summary(self, stop_id=None, route_id=None, days=7):
+        """
+        Get average and max delay stats for the given stop/route over the last N days.
+        """
+        if not hasattr(self, "_delay_db_path"):
+            raise RuntimeError("Call init_delay_tracking() first")
+        since = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S")
+        query = """
+            SELECT route_id, route_short_name, stop_id,
+                   COUNT(*) as sample_count,
+                   ROUND(AVG(delay_seconds), 1) as avg_delay,
+                   MAX(delay_seconds) as max_delay,
+                   MIN(delay_seconds) as min_delay
+            FROM delay_records
+            WHERE recorded_at >= ?
+        """
+        params: list = [since]
+        if stop_id:
+            query += " AND stop_id = ?"
+            params.append(stop_id)
+        if route_id:
+            query += " AND route_id = ?"
+            params.append(route_id)
+        query += " GROUP BY route_id, stop_id ORDER BY avg_delay DESC"
+        conn = sqlite3.connect(self._delay_db_path)
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(query, params).fetchall()
+        conn.close()
+        return [dict(row) for row in rows]
+
+    def purge_old_delays(self, keep_days=30):
+        """Remove delay records older than keep_days to control storage size."""
+        if not hasattr(self, "_delay_db_path"):
+            raise RuntimeError("Call init_delay_tracking() first")
+        cutoff = (datetime.now() - timedelta(days=keep_days)).strftime("%Y-%m-%d %H:%M:%S")
+        conn = sqlite3.connect(self._delay_db_path)
+        cursor = conn.execute("DELETE FROM delay_records WHERE recorded_at < ?", (cutoff,))
+        deleted = cursor.rowcount
+        conn.commit()
+        conn.close()
+        # VACUUM must run outside a transaction
+        conn = sqlite3.connect(self._delay_db_path, isolation_level=None)
+        conn.execute("VACUUM")
+        conn.close()
+        logger.info("Purged %d delay records older than %d days", deleted, keep_days)
+        return deleted
 
 
 if __name__ == "__main__":
