@@ -21,7 +21,7 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 
 ### 2. Clone the repository
 ```sh
-git clone https://github.com/yourusername/gtfs-dublin.git
+git clone https://github.com/aboland/gtfs-dublin.git
 cd gtfs-dublin
 ```
 
@@ -41,10 +41,12 @@ cp .env.example .env
 ```sh
 uv run python update_gtfs.py
 ```
-```
+
+Or from Python:
 ```python
-from gtfs_dublin.gtfs_loader import download_latest_gtfs
+from gtfs_core.gtfs_loader import download_latest_gtfs
 download_latest_gtfs()
+```
 ```
 
 ## Usage
@@ -98,7 +100,6 @@ The MCP server provides AI-accessible tools for transport data:
 ### Code Quality
 This project uses modern Python tooling for code quality:
 
-- **Black**: Code formatting (88 character line length)
 - **Ruff**: Fast Python linter and code formatter
 - **MyPy**: Static type checking
 - **Pre-commit**: Git hooks for automated quality checks
@@ -119,19 +120,7 @@ make type-check
 
 # Run all checks
 make check
-
-# Install pre-commit hooks
-make pre-commit-install
-
-# Run pre-commit on all files
-make pre-commit-run
 ```
-
-- Format code: `make format` (uses Black via UV)
-- Run linter: `make lint` (uses Ruff via UV)
-- Type check: `make type-check` (uses MyPy via UV)
-- Run tests: `make test` (uses pytest via UV)
-- Clean build/test artifacts: `make clean`
 
 ## Project Structure
 ```
@@ -152,30 +141,18 @@ mcp-server/            # MCP server for AI integration
     update_gtfs.py     # GTFS update script for MCP
 
 scripts/               # Utility scripts
-    update_gtfs.py     # GTFS data download script
+    update-gtfs-monthly.sh  # Monthly GTFS cron script
 
 GTFS_Realtime/         # GTFS data files (auto-downloaded)
 Makefile               # Development and deployment tasks
 docker-compose.yml     # Multi-service Docker setup
 pyproject.toml         # UV workspace configuration
 ```
-    transport_api_server.py # FastAPI server
-mcp-server/            # MCP server for AI integration
-    main.py            # MCP server entrypoint
-    pyproject.toml     # MCP server dependencies
-    README.md          # MCP server documentation
-GTFS_Realtime/         # GTFS data files (updated periodically)
-Makefile               # Common tasks (build, test, format, Docker)
-pyproject.toml         # UV / build configuration (project + workspace)
-uv.lock                # UV workspace lockfile
-requirements.txt       # (legacy, for Docker)
-README.md
-```
 
 ## Updating GTFS Data
 To download the latest GTFS data files:
 ```python
-from gtfs_dublin.gtfs_loader import download_latest_gtfs
+from gtfs_core.gtfs_loader import download_latest_gtfs
 download_latest_gtfs()
 ```
 This will back up existing files as `.bak` if present.

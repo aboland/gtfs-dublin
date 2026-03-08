@@ -37,7 +37,7 @@ test:
 	uv run pytest
 
 format:
-	uv run black gtfs_core/ gtfs_dublin/ mcp-server/
+	uv run ruff format gtfs_core/ gtfs_dublin/ mcp-server/
 
 lint:
 	uv run ruff check gtfs_core/ gtfs_dublin/ mcp-server/

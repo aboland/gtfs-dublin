@@ -98,7 +98,10 @@ class DeparturesFormatter:
         import json
         from collections import defaultdict
 
-        departures = json.loads(json_output)
+        if isinstance(json_output, str):
+            departures = json.loads(json_output)
+        else:
+            departures = json_output
         grouped = defaultdict(list)
         for dep in departures:
             stop_name = dep.get("stop_name", "Unknown Stop")

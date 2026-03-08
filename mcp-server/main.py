@@ -3,13 +3,10 @@
 MCP Server for GTFS Dublin Transport API
 """
 
+import logging
 import os
-import sys
-from pathlib import Path
-from typing import Any, cast
-
-# Add parent directory to path to import gtfs_dublin
-sys.path.insert(0, str(Path(__file__).parent.parent))
+from contextlib import asynccontextmanager
+from typing import Any
 
 # Load environment variables from .env file
 from dotenv import load_dotenv
@@ -21,6 +18,8 @@ from mcp.server.fastmcp import FastMCP  # noqa: E402
 from pydantic import BaseModel, Field  # noqa: E402
 
 from gtfs_core import TransportAPI  # noqa: E402
+
+logger = logging.getLogger(__name__)
 
 
 # Pydantic models for structured output
@@ -103,24 +102,40 @@ class CombinedScheduleResponse(BaseModel):
     live: list[CombinedDeparture]
 
 
-# Global API instance
-api: TransportAPI | None = None
+# Module-level API reference, set during lifespan
+_api: TransportAPI | None = None
+
+
+@asynccontextmanager
+async def app_lifespan(server: FastMCP):
+    """Initialize TransportAPI once at startup."""
+    global _api
+    api_key = os.environ.get("TRANSPORT_API_KEY")
+    if not api_key:
+        raise ValueError("TRANSPORT_API_KEY environment variable is required")
+    gtfs_dir = os.environ.get("GTFS_DIR", "../GTFS_Realtime")
+    _api = TransportAPI(api_key=api_key, gtfs_dir=gtfs_dir)
+    logger.info("TransportAPI initialized successfully")
+    yield {"api": _api}
+    _api = None
 
 
 def get_api() -> TransportAPI:
-    """Get or create TransportAPI instance"""
-    global api
-    if api is None:
-        api_key = os.environ.get("TRANSPORT_API_KEY")
-        if not api_key:
-            raise ValueError("TRANSPORT_API_KEY environment variable is required")
-        gtfs_dir = os.environ.get("GTFS_DIR", "../GTFS_Realtime")
-        api = TransportAPI(api_key=api_key, gtfs_dir=gtfs_dir)
-    return api
+    """Get the TransportAPI instance initialized at startup."""
+    if _api is None:
+        raise RuntimeError(
+            "TransportAPI not initialized. Server may still be starting up."
+        )
+    return _api
 
 
 # Create MCP server
-mcp = FastMCP("GTFS Dublin Transport API", host="0.0.0.0", port=8001)
+mcp = FastMCP(
+    "GTFS Dublin Transport API",
+    host="0.0.0.0",
+    port=8001,
+    lifespan=app_lifespan,
+)
 
 
 @mcp.tool()
@@ -133,9 +148,13 @@ def get_vehicles_near_location(
     Get vehicles within a specified radius of a geographic location.
     Returns vehicle information including position, route, and trip details.
     """
-    api = get_api()
-    vehicles = api.get_vehicles_near_location(lat, lon, radius_m)
-    return [VehicleInfo(**v) for v in vehicles]
+    try:
+        api = get_api()
+        vehicles = api.get_vehicles_near_location(lat, lon, radius_m)
+        return [VehicleInfo(**v) for v in vehicles]
+    except Exception as e:
+        logger.exception("Error in get_vehicles_near_location")
+        raise RuntimeError(f"Failed to get vehicles near location: {e}") from e
 
 
 @mcp.tool()
@@ -147,9 +166,15 @@ def get_vehicles_near_stop(
     Get vehicles within a specified radius of a GTFS stop.
     Returns vehicle information including position, route, and trip details.
     """
-    api = get_api()
-    vehicles = api.get_vehicles_near_stop(stop_id, radius_m)
-    return [VehicleInfo(**v) for v in vehicles]
+    try:
+        api = get_api()
+        vehicles = api.get_vehicles_near_stop(stop_id, radius_m)
+        return [VehicleInfo(**v) for v in vehicles]
+    except ValueError as e:
+        raise RuntimeError(f"Stop not found: {e}") from e
+    except Exception as e:
+        logger.exception("Error in get_vehicles_near_stop")
+        raise RuntimeError(f"Failed to get vehicles near stop: {e}") from e
 
 
 @mcp.tool()
@@ -158,13 +183,18 @@ def get_departures_for_stops(
     use_stop_code: bool = Field(
         default=False, description="Whether stop_ids are stop codes instead of stop IDs"
     ),
-) -> str:
+) -> list[DepartureInfo]:
     """
     Get real-time departures for specified stops.
-    Returns JSON string with detailed departure information including delays and vehicle positions.
+    Returns detailed departure information including delays and vehicle positions.
     """
-    api = get_api()
-    return cast(str, api.get_departures_for_stops(stop_ids, use_stop_code))
+    try:
+        api = get_api()
+        departures = api.get_departures_for_stops(stop_ids, use_stop_code)
+        return [DepartureInfo(**d) for d in departures]
+    except Exception as e:
+        logger.exception("Error in get_departures_for_stops")
+        raise RuntimeError(f"Failed to get departures: {e}") from e
 
 
 @mcp.tool()
@@ -182,9 +212,13 @@ def get_scheduled_times_for_route_stop(
     Get scheduled departure times for a specific route and stop.
     Returns schedule entries with trip, route, and calendar information.
     """
-    api = get_api()
-    schedule = api.get_scheduled_times_for_route_stop(route_id, stop_id, use_stop_code)
-    return [ScheduleEntry(**entry) for entry in schedule]
+    try:
+        api = get_api()
+        schedule = api.get_scheduled_times_for_route_stop(route_id, stop_id, use_stop_code)
+        return [ScheduleEntry(**entry) for entry in schedule]
+    except Exception as e:
+        logger.exception("Error in get_scheduled_times_for_route_stop")
+        raise RuntimeError(f"Failed to get schedule: {e}") from e
 
 
 @mcp.tool()
@@ -201,11 +235,15 @@ def get_combined_departures_and_schedule(
     Get combined real-time and scheduled departures for specified stops.
     Merges live data with scheduled data for a comprehensive view.
     """
-    api = get_api()
-    result = api.get_combined_departures_and_schedule(
-        stop_ids, window_future, use_stop_code
-    )
-    return CombinedScheduleResponse(**result)
+    try:
+        api = get_api()
+        result = api.get_combined_departures_and_schedule(
+            stop_ids, window_future, use_stop_code
+        )
+        return CombinedScheduleResponse(**result)
+    except Exception as e:
+        logger.exception("Error in get_combined_departures_and_schedule")
+        raise RuntimeError(f"Failed to get combined departures: {e}") from e
 
 
 @mcp.tool()
@@ -213,12 +251,101 @@ def format_departures_output(
     json_output: str = Field(description="JSON output from get_departures_for_stops"),
 ) -> str:
     """
-    Format raw departure JSON output into a human-readable format.
-    Note: This function prints formatted output to console and returns a summary.
+    Format raw departure JSON output into a human-readable summary.
+    Returns a formatted text string with departure information grouped by stop.
     """
-    api = get_api()
-    api.format_departures_output(json_output)
-    return "Departures formatted and printed to console. Check the output above."
+    import json
+    from collections import defaultdict
+
+    departures = json.loads(json_output)
+    grouped: dict[str, list] = defaultdict(list)
+    for dep in departures:
+        stop_name = dep.get("stop_name", "Unknown Stop")
+        grouped[stop_name].append(dep)
+
+    lines = []
+    for stop in sorted(grouped.keys()):
+        lines.append(f"\n=== {stop} ===")
+        sorted_deps = sorted(
+            grouped[stop],
+            key=lambda d: (
+                d["time_left"] is None,
+                d["time_left"] if d["time_left"] is not None else float("inf"),
+            ),
+        )
+        for dep in sorted_deps:
+            route = dep.get("route_short_name", "")
+            time_left = dep.get("time_left")
+            if time_left is not None:
+                minsec = f"{abs(time_left)//60}:{abs(time_left)%60:02d}"
+                if time_left < 0:
+                    minsec = f"-{minsec}"
+            else:
+                minsec = "N/A"
+            scheduled = dep.get("scheduled_departure_time", "N/A")
+            expected = dep.get("expected_departure_time", "N/A")
+            lines.append(
+                f"Route: {route} | Time Left: {minsec} | Scheduled: {scheduled} | Expected: {expected}"
+            )
+    return "\n".join(lines) if lines else "No departures found."
+
+
+# --- MCP Resources ---
+
+
+@mcp.resource("stop://{stop_id}")
+def get_stop_info(stop_id: str) -> str:
+    """Get information about a specific GTFS stop including name, location, and stop code."""
+    try:
+        api = get_api()
+        stop = api.stop_info_lookup.get(stop_id)
+        if not stop:
+            return f"Stop {stop_id} not found"
+        return (
+            f"Stop ID: {stop_id}\n"
+            f"Name: {stop.get('stop_name', 'Unknown')}\n"
+            f"Code: {stop.get('stop_code', 'N/A')}\n"
+            f"Location: {stop.get('stop_lat', '?')}, {stop.get('stop_lon', '?')}"
+        )
+    except Exception as e:
+        return f"Error looking up stop {stop_id}: {e}"
+
+
+@mcp.resource("route://{route_id}")
+def get_route_info(route_id: str) -> str:
+    """Get the short name for a GTFS route."""
+    try:
+        api = get_api()
+        short_name = api.route_short_name_lookup.get(route_id)
+        if not short_name:
+            return f"Route {route_id} not found"
+        return f"Route ID: {route_id}\nShort Name: {short_name}"
+    except Exception as e:
+        return f"Error looking up route {route_id}: {e}"
+
+
+# --- MCP Prompts ---
+
+
+@mcp.prompt()
+def departure_summary(stop_ids: str) -> str:
+    """Generate a prompt asking for a departure summary for comma-separated stop IDs."""
+    ids = [s.strip() for s in stop_ids.split(",") if s.strip()]
+    stop_list = ", ".join(ids)
+    return (
+        f"Please get the combined real-time and scheduled departures for stops: {stop_list}. "
+        "Summarize the upcoming departures, highlighting any delays. "
+        "Group by stop and sort by soonest departure."
+    )
+
+
+@mcp.prompt()
+def nearby_vehicles(lat: str, lon: str, radius_m: str = "500") -> str:
+    """Generate a prompt asking about vehicles near a location."""
+    return (
+        f"Please find all vehicles within {radius_m} meters of latitude {lat}, longitude {lon}. "
+        "List each vehicle with its route, headsign, and distance from the point."
+    )
 
 
 if __name__ == "__main__":

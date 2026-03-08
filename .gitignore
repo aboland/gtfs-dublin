@@ -65,3 +65,5 @@ ignore//.DS_Store
 /.venv
 /__pycache__
 /ignore
+mcp-server/.env
+temp_trip_updates.txt

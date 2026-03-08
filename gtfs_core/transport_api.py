@@ -1,5 +1,3 @@
-import csv
-import json
 import os
 from datetime import datetime, timedelta
 
@@ -10,24 +8,82 @@ from .formatting import DeparturesFormatter
 from .gtfs_loader import GTFSDataError, GTFSDataLoader
 
 
-class VehicleDataFetcher:
-    """Handles fetching and caching of GTFS Realtime data."""
+class TransportAPI:
+    # --- Initialization and Configuration ---
+    def __init__(self, api_key=None, gtfs_dir=None, focus_stops=None):
+        # Configuration from env vars or parameters
+        self.api_key = api_key or os.environ.get("TRANSPORT_API_KEY")
+        if not self.api_key:
+            raise ValueError(
+                "API key must be provided via argument or TRANSPORT_API_KEY env var."
+            )
+        self.headers = {
+            "x-api-key": self.api_key,
+            "Cache-Control": "no-cache",
+        }
+        self.gtfs_dir = gtfs_dir or os.environ.get("GTFS_DIR", "GTFS_Realtime")
+        try:
+            self.gtfs = GTFSDataLoader(self.gtfs_dir, focus_stops=focus_stops)
+        except GTFSDataError as e:
+            raise RuntimeError(f"Failed to load GTFS data: {e}") from e
+        # Use loader's lookups
+        self.trip_headsign_lookup = self.gtfs.trip_headsign_lookup
+        self.trip_service_lookup = self.gtfs.trip_service_lookup
+        self.route_short_name_lookup = self.gtfs.route_short_name_lookup
+        self.stop_info_lookup = self.gtfs.stop_info_lookup
+        self.stop_times_by_stop = self.gtfs.stop_times_by_stop
+        self.departure_lookup = self.gtfs.departure_lookup
+        # HTTP session with sensible defaults: timeouts and retries
+        from requests.adapters import HTTPAdapter
+        from urllib3.util.retry import Retry
 
-    def __init__(self, session, headers, request_timeout, trip_headsign_lookup, route_short_name_lookup, gtfs):
+        self.request_timeout = int(os.environ.get("GTFS_REQUEST_TIMEOUT", 5))
+        session = requests.Session()
+        retries = Retry(
+            total=3,
+            backoff_factor=0.3,
+            status_forcelist=(429, 500, 502, 503, 504),
+            allowed_methods=("GET", "POST"),
+        )
+        adapter = HTTPAdapter(max_retries=retries)
+        session.mount("https://", adapter)
+        session.mount("http://", adapter)
         self.session = session
-        self.headers = headers
-        self.request_timeout = request_timeout
-        self.trip_headsign_lookup = trip_headsign_lookup
-        self.route_short_name_lookup = route_short_name_lookup
-        self.gtfs = gtfs
 
+    # --- Utility Methods ---
+    def _add_delay_to_time(self, time_str, delay_seconds):
+        t = datetime.strptime(time_str, "%H:%M:%S").time()
+        today = datetime.today().date()
+        dt = datetime.combine(today, t)
+        new_time = dt + timedelta(seconds=delay_seconds)
+        return new_time.strftime("%H:%M:%S"), new_time
+
+    def _seconds_until_departure(self, expected_departure_dt):
+        now = datetime.now().replace(microsecond=0)
+        delta = expected_departure_dt - now
+        return int(delta.total_seconds())
+
+    def _format_seconds_to_min_sec(self, seconds):
+        minutes, secs = divmod(abs(seconds), 60)
+        sign = "-" if seconds < 0 else ""
+        return f"{sign}{minutes}:{secs:02d}"
+
+    def _haversine_distance(self, lat1, lon1, lat2, lon2):
+        """Calculate the great-circle distance between two points on the Earth (in meters)."""
+        from math import atan2, cos, radians, sin, sqrt
+
+        R = 6371000  # Earth radius in meters
+        phi1, phi2 = radians(lat1), radians(lat2)
+        dphi = radians(lat2 - lat1)
+        dlambda = radians(lon2 - lon1)
+        a = sin(dphi / 2) ** 2 + cos(phi1) * cos(phi2) * sin(dlambda / 2) ** 2
+        c = 2 * atan2(sqrt(a), sqrt(1 - a))
+        return R * c
+
+    # --- GTFS Realtime Data Fetchers (with caching) ---
     def _cached_fetch(self, cache_attr, fetch_func, max_age_seconds=20):
-        """
-        Fetches data with time-based caching. Returns cached data if fresh (< max_age_seconds).
-        On fetch failure, returns cached data if available as fallback.
-        """
+        """Fetch data with time-based caching. Returns cached data if fresh (< max_age_seconds)."""
         import logging
-        from datetime import datetime
 
         now = datetime.now()
         cache = getattr(self, cache_attr, None)
@@ -38,7 +94,6 @@ class VehicleDataFetcher:
             if age < max_age_seconds:
                 return cache
 
-        # Fetch fresh data
         try:
             data = fetch_func()
             setattr(self, cache_attr, data)
@@ -103,15 +158,9 @@ class VehicleDataFetcher:
             # Enrich vehicle entries with static GTFS info when available
             for tid, v in list(vehicle_lookup.items()):
                 try:
-                    route_id = None
-                    headsign = None
-                    # Prefer trip->route mapping if GTFS loader provides it
-                    if hasattr(self.gtfs, "trip_id_to_info"):
-                        tinfo = self.gtfs.trip_id_to_info.get(tid)
-                        if tinfo:
-                            route_id = tinfo.get("route_id")
-                            headsign = tinfo.get("trip_headsign") or tinfo.get("trip_headsign", None)
-                    # Fallback: use trip_headsign_lookup which maps (trip_id, route_id) -> headsign
+                    tinfo = self.gtfs.trip_info_lookup.get(tid)
+                    route_id = tinfo["route_id"] if tinfo else None
+                    headsign = tinfo["trip_headsign"] if tinfo else None
                     if not headsign:
                         for (t_id, r_id), h in self.trip_headsign_lookup.items():
                             if t_id == tid:
@@ -120,203 +169,13 @@ class VehicleDataFetcher:
                                 break
                     if route_id:
                         v["route_short_name"] = self.route_short_name_lookup.get(route_id, "")
-                        # trip_short_name is sometimes used as a vehicle-facing number
-                        # attempt to read it from trip data if available
-                        if hasattr(self.gtfs, "trip_id_to_info") and tinfo:
-                            tsn = tinfo.get("trip_short_name") or tinfo.get("trip_short_name", None)
-                            if tsn:
-                                v["trip_short_name"] = tsn
-                    if headsign:
-                        v["trip_headsign"] = headsign
-                except Exception:
-                    # Don't fail vehicle parsing for enrichment errors
-                    continue
-            return vehicle_lookup
-
-        return self._cached_fetch("_vehicle_positions_cache", fetch_func, max_age_seconds=20)
-
-
-class GTFSQueries:
-    """Handles static GTFS data queries."""
-
-    def __init__(self, gtfs):
-        self.gtfs = gtfs
-        self.trip_headsign_lookup = gtfs.trip_headsign_lookup
-        self.trip_service_lookup = gtfs.trip_service_lookup
-        self.route_short_name_lookup = gtfs.route_short_name_lookup
-        self.stop_info_lookup = gtfs.stop_info_lookup
-        self.stop_times_by_stop = gtfs.stop_times_by_stop
-        self.departure_lookup = gtfs.departure_lookup
-
-    def get_scheduled_times_for_route_stop(self, route_id, stop_id, direction_id=None, max_departures=5):
-        """Get scheduled departure times for a specific route and stop."""
-        # Implementation from TransportAPI
-        # (copy the method body)
-        pass  # I'll fill this later
-
-    # Add other static query methods
-
-
-class DepartureService:
-    """Handles combined departure queries using realtime and static data."""
-
-    def __init__(self, data_fetcher, gtfs_queries):
-        self.data_fetcher = data_fetcher
-        self.gtfs_queries = gtfs_queries
-
-    def get_combined_departures_and_schedule(self, stops, max_departures=5, include_vehicles=True):
-        """Get combined realtime and scheduled departures."""
-        # Implementation
-        pass
-
-
-class TransportAPI:
-    # --- Initialization and Configuration ---
-    def __init__(self, api_key=None, gtfs_dir=None, focus_stops=None):
-        # Configuration from env vars or parameters
-        self.api_key = api_key or os.environ.get("TRANSPORT_API_KEY")
-        if not self.api_key:
-            raise ValueError(
-                "API key must be provided via argument or TRANSPORT_API_KEY env var."
-            )
-        self.headers = {
-            "x-api-key": self.api_key,
-            "Cache-Control": "no-cache",
-        }
-        self.gtfs_dir = gtfs_dir or os.environ.get("GTFS_DIR", "GTFS_Realtime")
-        try:
-            self.gtfs = GTFSDataLoader(self.gtfs_dir, focus_stops=focus_stops)
-        except GTFSDataError as e:
-            raise RuntimeError(f"Failed to load GTFS data: {e}") from e
-        # Use loader's lookups
-        self.trip_headsign_lookup = self.gtfs.trip_headsign_lookup
-        self.trip_service_lookup = self.gtfs.trip_service_lookup
-        self.route_short_name_lookup = self.gtfs.route_short_name_lookup
-        self.stop_info_lookup = self.gtfs.stop_info_lookup
-        self.stop_times_by_stop = self.gtfs.stop_times_by_stop
-        self.departure_lookup = self.gtfs.departure_lookup
-        # HTTP session with sensible defaults: timeouts and retries
-        from requests.adapters import HTTPAdapter
-        from urllib3.util.retry import Retry
-
-        self.request_timeout = int(os.environ.get("GTFS_REQUEST_TIMEOUT", 5))
-        session = requests.Session()
-        retries = Retry(
-            total=3,
-            backoff_factor=0.3,
-            status_forcelist=(429, 500, 502, 503, 504),
-            allowed_methods=("GET", "POST"),
-        )
-        adapter = HTTPAdapter(max_retries=retries)
-        session.mount("https://", adapter)
-        session.mount("http://", adapter)
-        self.session = session
-
-        # Compose with sub-components
-        self.data_fetcher = VehicleDataFetcher(self.session, self.headers, self.request_timeout, self.trip_headsign_lookup, self.route_short_name_lookup, self.gtfs)
-        self.gtfs_queries = GTFSQueries(self.gtfs)
-        self.departure_service = DepartureService(self.data_fetcher, self.gtfs_queries)
-
-    # --- Utility Methods ---
-    def _add_delay_to_time(self, time_str, delay_seconds):
-        t = datetime.strptime(time_str, "%H:%M:%S").time()
-        today = datetime.today().date()
-        dt = datetime.combine(today, t)
-        new_time = dt + timedelta(seconds=delay_seconds)
-        return new_time.strftime("%H:%M:%S"), new_time
-
-    def _seconds_until_departure(self, expected_departure_dt):
-        now = datetime.now().replace(microsecond=0)
-        delta = expected_departure_dt - now
-        return int(delta.total_seconds())
-
-    def _format_seconds_to_min_sec(self, seconds):
-        minutes, secs = divmod(abs(seconds), 60)
-        sign = "-" if seconds < 0 else ""
-        return f"{sign}{minutes}:{secs:02d}"
-
-    def _haversine_distance(self, lat1, lon1, lat2, lon2):
-        """Calculate the great-circle distance between two points on the Earth (in meters)."""
-        from math import atan2, cos, radians, sin, sqrt
-
-        R = 6371000  # Earth radius in meters
-        phi1, phi2 = radians(lat1), radians(lat2)
-        dphi = radians(lat2 - lat1)
-        dlambda = radians(lon2 - lon1)
-        a = sin(dphi / 2) ** 2 + cos(phi1) * cos(phi2) * sin(dlambda / 2) ** 2
-        c = 2 * atan2(sqrt(a), sqrt(1 - a))
-        return R * c
-
-    # --- GTFS Realtime Fetchers ---
-    def _fetch_trip_updates(self):
-        def fetch_func():
-            feed = gtfs_realtime_pb2.FeedMessage()
-            url = os.environ.get(
-                "GTFS_TRIP_UPDATES_URL", "https://api.nationaltransport.ie/gtfsr/v2/gtfsr"
-            )
-            response = self.session.get(url, headers=self.headers, timeout=self.request_timeout)
-            response.raise_for_status()
-            feed.ParseFromString(response.content)
-            return feed
-
-        return self._cached_fetch("_trip_updates_cache", fetch_func, max_age_seconds=20)
-
-    def _fetch_vehicle_positions(self):
-        def fetch_func():
-            vfeed = gtfs_realtime_pb2.FeedMessage()
-            url = os.environ.get(
-                "GTFS_VEHICLE_POSITIONS_URL",
-                "https://api.nationaltransport.ie/gtfsr/v2/Vehicles",
-            )
-            vresponse = self.session.get(url, headers=self.headers, timeout=self.request_timeout)
-            vresponse.raise_for_status()
-            vfeed.ParseFromString(vresponse.content)
-            vehicle_lookup = {}
-            for entity in vfeed.entity:
-                if entity.HasField("vehicle"):
-                    trip_id = entity.vehicle.trip.trip_id
-                    vehicle_lookup[trip_id] = {
-                        "trip_id": trip_id,
-                        "vehicle_id": entity.vehicle.vehicle.id,
-                        "position": {
-                            "lat": entity.vehicle.position.latitude,
-                            "lon": entity.vehicle.position.longitude,
-                        },
-                        "timestamp": entity.vehicle.timestamp,
-                        "schedule_relationship": gtfs_realtime_pb2.TripDescriptor.ScheduleRelationship.Name(
-                            entity.vehicle.trip.schedule_relationship
-                        ),
-                    }
-            # Enrich vehicle entries with static GTFS info when available
-            for tid, v in list(vehicle_lookup.items()):
-                try:
-                    route_id = None
-                    headsign = None
-                    # Prefer trip->route mapping if GTFS loader provides it
-                    if hasattr(self.gtfs, "trip_id_to_info"):
-                        tinfo = self.gtfs.trip_id_to_info.get(tid)
                         if tinfo:
-                            route_id = tinfo.get("route_id")
-                            headsign = tinfo.get("trip_headsign") or tinfo.get("trip_headsign", None)
-                    # Fallback: use trip_headsign_lookup which maps (trip_id, route_id) -> headsign
-                    if not headsign:
-                        for (t_id, r_id), h in self.trip_headsign_lookup.items():
-                            if t_id == tid:
-                                route_id = route_id or r_id
-                                headsign = h
-                                break
-                    if route_id:
-                        v["route_short_name"] = self.route_short_name_lookup.get(route_id, "")
-                        # trip_short_name is sometimes used as a vehicle-facing number
-                        # attempt to read it from trip data if available
-                        if hasattr(self.gtfs, "trip_id_to_info") and tinfo:
-                            tsn = tinfo.get("trip_short_name") or tinfo.get("trip_short_name", None)
+                            tsn = tinfo.get("trip_short_name")
                             if tsn:
                                 v["trip_short_name"] = tsn
                     if headsign:
                         v["trip_headsign"] = headsign
                 except Exception:
-                    # Don't fail vehicle parsing for enrichment errors
                     continue
             return vehicle_lookup
 
@@ -328,7 +187,7 @@ class TransportAPI:
         Returns a list of vehicles within `radius_m` metres of the given (lat, lon).
         Adds route_short_name and trip_headsign if available.
         """
-        vehicle_lookup = self.data_fetcher._fetch_vehicle_positions()
+        vehicle_lookup = self._fetch_vehicle_positions()
         nearby = []
         for v in vehicle_lookup.values():
             vlat = v["position"]["lat"]
@@ -337,36 +196,7 @@ class TransportAPI:
             if dist <= radius_m:
                 v_copy = v.copy()
                 v_copy["distance_to_point_m"] = dist
-                # Try to add route_short_name and trip_headsign if trip_id is available
-                trip_id = v.get("trip_id")
-                route_id = None
-                headsign = None
-                if trip_id:
-                    # Find route_id from trip_id using GTFS static data
-                    if hasattr(self.gtfs, "trip_id_to_info"):
-                        t_info = self.gtfs.trip_id_to_info.get(trip_id)
-                        if t_info:
-                            route_id = t_info.get("route_id")
-                    if not route_id:
-                        # Fallback: try to get from trip_headsign_lookup
-                        for (t_id, r_id), h in self.trip_headsign_lookup.items():
-                            if t_id == trip_id:
-                                route_id = r_id
-                                headsign = h
-                                break
-                    if route_id:
-                        v_copy["route_short_name"] = self.route_short_name_lookup.get(
-                            route_id, ""
-                        )
-                    # Add headsign if available
-                    if headsign is None:
-                        # Try to get headsign from trip_headsign_lookup
-                        for (t_id, _r_id), h in self.trip_headsign_lookup.items():
-                            if t_id == trip_id:
-                                headsign = h
-                                break
-                    if headsign:
-                        v_copy["trip_headsign"] = headsign
+                # Vehicles are already enriched with route/headsign from _fetch_vehicle_positions
                 nearby.append(v_copy)
         return nearby
 
@@ -391,8 +221,8 @@ class TransportAPI:
             stop_ids = [self.gtfs.stop_code_to_id.get(code, code) for code in stop_ids]
         else:
             stop_ids = stop_ids
-        feed = self.data_fetcher._fetch_trip_updates()
-        vehicle_lookup = self.data_fetcher._fetch_vehicle_positions()
+        feed = self._fetch_trip_updates()
+        vehicle_lookup = self._fetch_vehicle_positions()
         departures = []
         for entity in feed.entity:
             if entity.HasField("trip_update"):
@@ -491,7 +321,7 @@ class TransportAPI:
                             except Exception:
                                 dep["vehicle_seconds_since_update"] = None
                         departures.append(dep)
-        return json.dumps(departures, indent=2, default=str)
+        return departures
 
     def format_departures_output(self, json_output):
         return DeparturesFormatter.format_departures_output(json_output)
@@ -518,44 +348,26 @@ class TransportAPI:
         if use_stop_code and stop_id is not None:
             sid = self.gtfs.stop_code_to_id.get(stop_id, stop_id)
 
-        # 1. Build trip lookup: trip_id -> (route_id, service_id, trip_headsign, trip_short_name)
-        trip_lookup = {}
-        with open(f"{self.gtfs_dir}/trips.txt", newline="") as trips_file:
-            reader = csv.DictReader(trips_file)
-            for row in reader:
-                if route_id is None or row["route_id"] == route_id:
-                    trip_lookup[row["trip_id"]] = {
-                        "route_id": row["route_id"],
-                        "service_id": row["service_id"],
-                        "trip_headsign": row.get("trip_headsign", ""),
-                        "trip_short_name": row.get("trip_short_name", ""),
-                    }
-        # 2. Use in-memory index if available
         results = []
         stop_ids = [sid] if sid is not None else list(self.stop_times_by_stop.keys())
         for sid in stop_ids:
             for row in self.stop_times_by_stop.get(sid, []):
-                trip = trip_lookup.get(row["trip_id"])
+                trip = self.gtfs.trip_info_lookup.get(row["trip_id"])
                 if not trip:
+                    continue
+                if route_id is not None and trip["route_id"] != route_id:
                     continue
                 route_id_val = trip["route_id"]
                 route_short_name = self.route_short_name_lookup.get(route_id_val, "")
                 result = trip.copy()
-                result["trip_id"] = row["trip_id"]  # Ensure trip_id is present
+                result["trip_id"] = row["trip_id"]
                 result["arrival_time"] = row["arrival_time"]
                 result["departure_time"] = row["departure_time"]
                 result["stop_sequence"] = row["stop_sequence"]
                 result["route_short_name"] = route_short_name
+                cal = self.gtfs.calendar_lookup.get(result["service_id"], {})
+                result["calendar"] = cal
                 results.append(result)
-        # 3. For each result, get calendar info for service_id
-        calendar_lookup = {}
-        with open(f"{self.gtfs_dir}/calendar.txt", newline="") as cal_file:
-            reader = csv.DictReader(cal_file)
-            for row in reader:
-                calendar_lookup[row["service_id"]] = row
-        for result in results:
-            cal = calendar_lookup.get(result["service_id"], {})
-            result["calendar"] = cal
         return results
 
     def filter_schedule_by_time_window(
@@ -619,7 +431,6 @@ class TransportAPI:
         """
         Returns a dict with the current timestamp and a 'live' key containing a flat list of all departures (with all info in each entry).
         """
-        import json
         from copy import deepcopy
 
         # Map stop_codes to stop_ids if needed
@@ -629,13 +440,12 @@ class TransportAPI:
             stop_ids = stop_ids
 
         now = datetime.now()
-        realtime_json = self.get_departures_for_stops(stop_ids, use_stop_code=False)
-        realtime = json.loads(realtime_json)
+        realtime = self.get_departures_for_stops(stop_ids, use_stop_code=False)
         rt_index = {(d["trip_id"], d["stop_id"]): d for d in realtime}
         all_entries = []
         for sid in stop_ids:
             schedule = self.get_scheduled_times_for_route_stop(
-                stop_id=sid, use_stop_code=use_stop_code
+                stop_id=sid, use_stop_code=False
             )
             filtered = self.filter_schedule_by_time_window(
                 schedule,
@@ -711,7 +521,6 @@ if __name__ == "__main__":
 
     logging.basicConfig(level=logging.INFO)
     api = TransportAPI(
-        api_key=os.environ.get("TRANSPORT_API_KEY", "309f2a3c4c8d486a8b23bd6037e98bb0"),
         focus_stops=["8220DB002437", "8220DB002438"],
     )
     # Combined real-time and scheduled departures for the next hour for two stops

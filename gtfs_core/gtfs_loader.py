@@ -21,6 +21,8 @@ class GTFSDataLoader:
         self.stop_times_by_stop = {}
         self.departure_lookup = {}
         self.stop_code_to_id = {}  # New: map stop_code to stop_id
+        self.trip_info_lookup = {}  # trip_id -> {route_id, service_id, trip_headsign, trip_short_name}
+        self.calendar_lookup = {}  # service_id -> calendar row
         self._loaded = False
         self._load_all()
 
@@ -30,6 +32,7 @@ class GTFSDataLoader:
             self._load_routes()
             self._load_stops()
             self._load_stop_times()
+            self._load_calendar()
         except Exception as e:
             raise GTFSDataError(f"Failed to load GTFS data: {e}") from e
         self._loaded = True
@@ -44,6 +47,12 @@ class GTFSDataLoader:
                 key = (row["trip_id"], row["route_id"])
                 self.trip_headsign_lookup[key] = row["trip_headsign"]
                 self.trip_service_lookup[key] = row["service_id"]
+                self.trip_info_lookup[row["trip_id"]] = {
+                    "route_id": row["route_id"],
+                    "service_id": row["service_id"],
+                    "trip_headsign": row.get("trip_headsign", ""),
+                    "trip_short_name": row.get("trip_short_name", ""),
+                }
 
     def _load_routes(self):
         path = os.path.join(self.gtfs_dir, "routes.txt")
@@ -83,8 +92,17 @@ class GTFSDataLoader:
             for row in reader:
                 if self.focus_stops is None or row["stop_id"] in self.focus_stops:
                     self.stop_times_by_stop.setdefault(row["stop_id"], []).append(row)
-                key = (row["trip_id"], row["stop_id"])
-                self.departure_lookup[key] = row["departure_time"]
+                    key = (row["trip_id"], row["stop_id"])
+                    self.departure_lookup[key] = row["departure_time"]
+
+    def _load_calendar(self):
+        path = os.path.join(self.gtfs_dir, "calendar.txt")
+        if not os.path.exists(path):
+            raise GTFSDataError(f"Missing file: {path}")
+        with open(path, newline="") as cal_file:
+            reader = csv.DictReader(cal_file)
+            for row in reader:
+                self.calendar_lookup[row["service_id"]] = row
 
 
 def download_latest_gtfs(
