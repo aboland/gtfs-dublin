@@ -1,0 +1,31 @@
+version: '3.8'
+services:
+  transport-api:
+    build: .
+    container_name: transport-api
+    environment:
+      - TRANSPORT_API_KEY=${TRANSPORT_API_KEY}
+      - STOPS=${STOPS}
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./GTFS_Realtime:/app/GTFS_Realtime:ro
+    restart: unless-stopped
+    command: ["uv", "run", "uvicorn", "gtfs_dublin.transport_api_server:app", "--host", "0.0.0.0", "--port", "8000"]
+
+  mcp-server:
+    build: .
+    container_name: mcp-server
+    environment:
+      - TRANSPORT_API_KEY=${TRANSPORT_API_KEY}
+      - STOPS=${STOPS}
+      - GTFS_DIR=/app/GTFS_Realtime
+    ports:
+      - "8001:8001"
+    volumes:
+      - ./GTFS_Realtime:/app/GTFS_Realtime:ro
+      - ./mcp-server/GTFS_Realtime:/app/mcp-server/GTFS_Realtime:ro
+    restart: unless-stopped
+    command: ["uv", "run", "--project", "mcp-server", "python", "mcp-server/main.py", "--transport", "streamable-http"]
+    depends_on:
+      - transport-api

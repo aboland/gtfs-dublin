@@ -1,0 +1,23 @@
+[project]
+name = "gtfs-dublin-mcp"
+version = "0.1.0"
+description = "MCP Server for GTFS Dublin Transport API"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "mcp[cli]>=1.26.0",
+    "gtfs-dublin",
+]
+
+[tool.hatch.build]
+packages = ["."]
+
+[tool.uv.sources]
+gtfs-dublin = { workspace = true }
+
+[tool.hatch.metadata]
+allow-direct-references = true
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
