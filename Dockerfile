@@ -29,12 +29,22 @@ RUN uv sync --frozen --no-install-project
 # Copy project files
 COPY . /app/
 
-# Pull Git LFS files and fall back to downloading fresh GTFS data if needed
-RUN git lfs pull --include="GTFS_Realtime/*.txt" || true && \
-    if [ ! -f GTFS_Realtime/stop_times.txt ] || grep -q "oid sha256" GTFS_Realtime/stop_times.txt 2>/dev/null; then \
-        echo "Downloading fresh GTFS data..."; \
-        python3 update_gtfs.py; \
-    fi
+# Initialize Git LFS and ensure GTFS data is available
+RUN git lfs install --system && \
+    echo "Attempting to pull Git LFS files..." && \
+    (git lfs pull --include="GTFS_Realtime/*.txt" && echo "Git LFS pull successful") || \
+    (echo "Git LFS pull failed, downloading fresh GTFS data..." && \
+     python3 update_gtfs.py && echo "Fresh GTFS download completed") && \
+    echo "Verifying GTFS data..." && \
+    if [ ! -f GTFS_Realtime/stop_times.txt ]; then \
+        echo "ERROR: stop_times.txt not found after LFS pull and download attempts"; \
+        exit 1; \
+    fi && \
+    if grep -q "oid sha256" GTFS_Realtime/stop_times.txt 2>/dev/null; then \
+        echo "ERROR: stop_times.txt contains LFS pointer instead of data"; \
+        exit 1; \
+    fi && \
+    echo "GTFS data verification passed"
 
 # Install the projects
 RUN uv sync --frozen
