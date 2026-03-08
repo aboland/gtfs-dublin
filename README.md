@@ -74,7 +74,23 @@ make up-api      # Run only the API server
 make up-mcp      # Run only the MCP server
 ```
 
+Docker Compose now manages GTFS data inside a Docker volume. You do not need `uv` or `git lfs` installed on the host machine for the normal compose workflow.
+
+If the GTFS data volume is empty, invalid, or contains Git LFS pointer files, the `gtfs-data-init` container downloads fresh GTFS files before the API services start.
+
+To force a GTFS refresh on the next startup:
+```sh
+GTFS_REFRESH_ON_START=1 docker compose up --build
+```
+
+To remove the persisted GTFS data volume and start clean:
+```sh
+docker compose down -v
+docker compose up --build
+```
+
 ### Docker Services
+- **GTFS Data Init**: One-shot init container that validates/downloads GTFS files into a shared Docker volume
 - **API Server** (port 8000): FastAPI REST API for transport data
 - **MCP Server** (port 8001): Model Context Protocol server for AI integration
 

@@ -133,3 +133,54 @@ class TestGTFSDataLoaderEdgeCases:
         )
         loader = GTFSDataLoader(str(tmp_path))
         assert loader.trip_info_lookup["T1"]["trip_headsign"] == ""
+
+    def test_lfs_pointer_file_raises_clear_error(self, tmp_path):
+        (tmp_path / "trips.txt").write_text(
+            "version https://git-lfs.github.com/spec/v1\n"
+            "oid sha256:abc123\n"
+            "size 123\n"
+        )
+        (tmp_path / "routes.txt").write_text(
+            "route_id,route_short_name,route_long_name\n"
+            "R1,15,Route 15\n"
+        )
+        (tmp_path / "stops.txt").write_text(
+            "stop_id,stop_code,stop_name,stop_lat,stop_lon\n"
+            "S100,1234,Main Street,53.3498,-6.2603\n"
+        )
+        (tmp_path / "stop_times.txt").write_text(
+            "trip_id,arrival_time,departure_time,stop_id,stop_sequence\n"
+            "T1,08:00:00,08:00:00,S100,1\n"
+        )
+        (tmp_path / "calendar.txt").write_text(
+            "service_id,monday,tuesday,wednesday,thursday,friday,saturday,sunday,start_date,end_date\n"
+            "S1,1,1,1,1,1,0,0,20240101,20261231\n"
+        )
+
+        with pytest.raises(GTFSDataError, match="Git LFS pointer"):
+            GTFSDataLoader(str(tmp_path))
+
+    def test_missing_required_columns_raises_clear_error(self, tmp_path):
+        (tmp_path / "trips.txt").write_text(
+            "route_id,service_id,trip_headsign\n"
+            "R1,S1,City Centre\n"
+        )
+        (tmp_path / "routes.txt").write_text(
+            "route_id,route_short_name,route_long_name\n"
+            "R1,15,Route 15\n"
+        )
+        (tmp_path / "stops.txt").write_text(
+            "stop_id,stop_code,stop_name,stop_lat,stop_lon\n"
+            "S100,1234,Main Street,53.3498,-6.2603\n"
+        )
+        (tmp_path / "stop_times.txt").write_text(
+            "trip_id,arrival_time,departure_time,stop_id,stop_sequence\n"
+            "T1,08:00:00,08:00:00,S100,1\n"
+        )
+        (tmp_path / "calendar.txt").write_text(
+            "service_id,monday,tuesday,wednesday,thursday,friday,saturday,sunday,start_date,end_date\n"
+            "S1,1,1,1,1,1,0,0,20240101,20261231\n"
+        )
+
+        with pytest.raises(GTFSDataError, match="missing expected GTFS columns"):
+            GTFSDataLoader(str(tmp_path))

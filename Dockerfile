@@ -29,6 +29,8 @@ RUN uv sync --frozen --no-install-project
 # Copy project files
 COPY . /app/
 
+RUN chmod +x /app/scripts/ensure_gtfs_data.sh
+
 # Initialize Git LFS and ensure GTFS data is available
 RUN git lfs install --system && \
     echo "=== GTFS Data Setup ===" && \

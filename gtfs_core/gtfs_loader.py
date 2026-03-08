@@ -37,12 +37,34 @@ class GTFSDataLoader:
             raise GTFSDataError(f"Failed to load GTFS data: {e}") from e
         self._loaded = True
 
-    def _load_trips(self):
-        path = os.path.join(self.gtfs_dir, "trips.txt")
+    def _open_csv_reader(self, path, required_columns):
         if not os.path.exists(path):
             raise GTFSDataError(f"Missing file: {path}")
-        with open(path, newline="") as trips_file:
-            reader = csv.DictReader(trips_file)
+
+        csv_file = open(path, newline="", encoding="utf-8-sig")
+        reader = csv.DictReader(csv_file)
+        fieldnames = reader.fieldnames or []
+
+        if fieldnames and fieldnames[0] == "version https://git-lfs.github.com/spec/v1":
+            csv_file.close()
+            raise GTFSDataError(
+                f"{path} is a Git LFS pointer, not GTFS data. Run 'git lfs pull' or refresh the GTFS files with update_gtfs.py."
+            )
+
+        missing_columns = [column for column in required_columns if column not in fieldnames]
+        if missing_columns:
+            csv_file.close()
+            raise GTFSDataError(
+                f"{path} is missing expected GTFS columns {missing_columns}. Found columns: {fieldnames}"
+            )
+
+        return csv_file, reader
+
+    def _load_trips(self):
+        path = os.path.join(self.gtfs_dir, "trips.txt")
+        required_columns = ["route_id", "service_id", "trip_id"]
+        trips_file, reader = self._open_csv_reader(path, required_columns)
+        try:
             for row in reader:
                 key = (row["trip_id"], row["route_id"])
                 self.trip_headsign_lookup[key] = row["trip_headsign"]
@@ -53,22 +75,24 @@ class GTFSDataLoader:
                     "trip_headsign": row.get("trip_headsign", ""),
                     "trip_short_name": row.get("trip_short_name", ""),
                 }
+        finally:
+            trips_file.close()
 
     def _load_routes(self):
         path = os.path.join(self.gtfs_dir, "routes.txt")
-        if not os.path.exists(path):
-            raise GTFSDataError(f"Missing file: {path}")
-        with open(path, newline="") as routes_file:
-            reader = csv.DictReader(routes_file)
+        required_columns = ["route_id", "route_short_name"]
+        routes_file, reader = self._open_csv_reader(path, required_columns)
+        try:
             for row in reader:
                 self.route_short_name_lookup[row["route_id"]] = row["route_short_name"]
+        finally:
+            routes_file.close()
 
     def _load_stops(self):
         path = os.path.join(self.gtfs_dir, "stops.txt")
-        if not os.path.exists(path):
-            raise GTFSDataError(f"Missing file: {path}")
-        with open(path, newline="") as stops_file:
-            reader = csv.DictReader(stops_file)
+        required_columns = ["stop_id", "stop_name", "stop_lat", "stop_lon"]
+        stops_file, reader = self._open_csv_reader(path, required_columns)
+        try:
             for row in reader:
                 # Always store stop_code in stop_info_lookup for later reference
                 self.stop_info_lookup[row["stop_id"]] = {
@@ -82,27 +106,31 @@ class GTFSDataLoader:
                 stop_id = row.get("stop_id", "")
                 if stop_code and stop_id:
                     self.stop_code_to_id[stop_code] = stop_id
+        finally:
+            stops_file.close()
 
     def _load_stop_times(self):
         path = os.path.join(self.gtfs_dir, "stop_times.txt")
-        if not os.path.exists(path):
-            raise GTFSDataError(f"Missing file: {path}")
-        with open(path, newline="") as stop_times_file:
-            reader = csv.DictReader(stop_times_file)
+        required_columns = ["trip_id", "stop_id", "departure_time", "arrival_time"]
+        stop_times_file, reader = self._open_csv_reader(path, required_columns)
+        try:
             for row in reader:
                 if self.focus_stops is None or row["stop_id"] in self.focus_stops:
                     self.stop_times_by_stop.setdefault(row["stop_id"], []).append(row)
                     key = (row["trip_id"], row["stop_id"])
                     self.departure_lookup[key] = row["departure_time"]
+        finally:
+            stop_times_file.close()
 
     def _load_calendar(self):
         path = os.path.join(self.gtfs_dir, "calendar.txt")
-        if not os.path.exists(path):
-            raise GTFSDataError(f"Missing file: {path}")
-        with open(path, newline="") as cal_file:
-            reader = csv.DictReader(cal_file)
+        required_columns = ["service_id", "start_date", "end_date"]
+        cal_file, reader = self._open_csv_reader(path, required_columns)
+        try:
             for row in reader:
                 self.calendar_lookup[row["service_id"]] = row
+        finally:
+            cal_file.close()
 
 
 def download_latest_gtfs(

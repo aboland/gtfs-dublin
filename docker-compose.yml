@@ -1,15 +1,30 @@
 services:
+  gtfs-data-init:
+    build: .
+    container_name: gtfs-data-init
+    environment:
+      - GTFS_DIR=/app/GTFS_Realtime
+      - GTFS_REFRESH_ON_START=${GTFS_REFRESH_ON_START:-0}
+    volumes:
+      - gtfs-data:/app/GTFS_Realtime
+    restart: "no"
+    command: ["/bin/sh", "/app/scripts/ensure_gtfs_data.sh"]
+
   transport-api:
     build: .
     container_name: transport-api
     environment:
       - TRANSPORT_API_KEY=${TRANSPORT_API_KEY}
       - STOPS=${STOPS}
+      - GTFS_DIR=/app/GTFS_Realtime
     ports:
       - "8000:8000"
     volumes:
-      - ./GTFS_Realtime:/app/GTFS_Realtime:ro
+      - gtfs-data:/app/GTFS_Realtime:ro
     restart: unless-stopped
+    depends_on:
+      gtfs-data-init:
+        condition: service_completed_successfully
     healthcheck:
       test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
       interval: 30s
@@ -28,7 +43,12 @@ services:
     ports:
       - "8001:8001"
     volumes:
-      - ./GTFS_Realtime:/app/GTFS_Realtime:ro
-      - ./mcp-server/GTFS_Realtime:/app/mcp-server/GTFS_Realtime:ro
+      - gtfs-data:/app/GTFS_Realtime:ro
     restart: unless-stopped
+    depends_on:
+      gtfs-data-init:
+        condition: service_completed_successfully
     command: ["uv", "run", "--project", "mcp-server", "python", "mcp-server/main.py", "--transport", "streamable-http"]
+
+volumes:
+  gtfs-data:
