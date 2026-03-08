@@ -31,22 +31,27 @@ COPY . /app/
 
 # Initialize Git LFS and ensure GTFS data is available
 RUN git lfs install --system && \
-    echo "Attempting to pull Git LFS files..." && \
-    (git lfs pull --include="GTFS_Realtime/*.txt" && echo "Git LFS pull successful") || \
-    (echo "Git LFS pull failed, downloading fresh GTFS data..." && \
-     python3 update_gtfs.py && echo "Fresh GTFS download completed") && \
-    echo "Verifying GTFS data..." && \
-    if [ ! -f GTFS_Realtime/stop_times.txt ]; then \
-        echo "ERROR: stop_times.txt not found after LFS pull and download attempts"; \
+    echo "=== GTFS Data Setup ===" && \
+    echo "Checking for existing GTFS files..." && \
+    ls -la GTFS_Realtime/ || true && \
+    echo "Attempting Git LFS pull..." && \
+    git lfs pull --include="GTFS_Realtime/*.txt" 2>&1 || echo "LFS pull failed" && \
+    echo "Checking if files are LFS pointers..." && \
+    if grep -q "oid sha256" GTFS_Realtime/stop_times.txt 2>/dev/null; then \
+        echo "Found LFS pointer, downloading fresh GTFS data..." && \
+        python3 update_gtfs.py 2>&1 && \
+        echo "Fresh download completed"; \
+    else \
+        echo "GTFS files appear to be valid"; \
+    fi && \
+    echo "Final verification..." && \
+    if [ ! -f GTFS_Realtime/stop_times.txt ] || grep -q "oid sha256" GTFS_Realtime/stop_times.txt 2>/dev/null; then \
+        echo "ERROR: GTFS data still not available after all attempts"; \
         exit 1; \
     fi && \
-    if grep -q "oid sha256" GTFS_Realtime/stop_times.txt 2>/dev/null; then \
-        echo "ERROR: stop_times.txt contains LFS pointer instead of data - downloading fresh data"; \
-        python3 update_gtfs.py && echo "Emergency GTFS download completed"; \
-    fi && \
-    echo "Checking file contents..." && \
-    head -5 GTFS_Realtime/stop_times.txt && \
-    echo "GTFS data verification passed"
+    echo "Sample of stop_times.txt:" && \
+    head -3 GTFS_Realtime/stop_times.txt && \
+    echo "GTFS setup completed successfully"
 
 # Install the projects
 RUN uv sync --frozen
