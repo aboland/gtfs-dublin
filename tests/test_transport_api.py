@@ -288,6 +288,7 @@ class TestTimingStatus:
         assert self.api._get_timing_status("schedule", True) == "schedule_only"
 
     def test_marks_schedule_only_entries_in_combined_output(self):
+        expected_time = (datetime.now() + timedelta(minutes=5)).strftime("%H:%M:%S")
         self.api.get_departures_for_stops = lambda stop_ids, use_stop_code=False: []
         self.api.get_scheduled_times_for_route_stop = (
             lambda stop_id, use_stop_code=False: [
@@ -298,8 +299,8 @@ class TestTimingStatus:
                     "service_id": "SVC1",
                     "trip_headsign": "City Centre",
                     "trip_short_name": "15",
-                    "arrival_time": (datetime.now() + timedelta(minutes=5)).strftime("%H:%M:%S"),
-                    "departure_time": (datetime.now() + timedelta(minutes=5)).strftime("%H:%M:%S"),
+                    "arrival_time": expected_time,
+                    "departure_time": expected_time,
                     "stop_sequence": 1,
                     "calendar": {
                         "monday": "1",
@@ -321,6 +322,7 @@ class TestTimingStatus:
         assert len(result["live"]) == 1
         assert result["live"][0]["source"] == "schedule"
         assert result["live"][0]["timing_status"] == "schedule_only"
+        assert result["live"][0]["expected_departure_time"] == expected_time
 
     def test_marks_scheduled_fallback_for_realtime_trip_without_prediction(self):
         self.api.get_departures_for_stops = lambda stop_ids, use_stop_code=False: [

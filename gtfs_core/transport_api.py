@@ -647,6 +647,9 @@ class TransportAPI:
                     dep = deepcopy(entry)
                     dep["source"] = "schedule"
                     dep["time_left"] = dep.get("seconds_until")
+                    dep["expected_departure_time"] = (
+                        dep.get("departure_time") or dep.get("arrival_time")
+                    )
                     dep["used_scheduled_time"] = True
                     dep["timing_status"] = self._get_timing_status(
                         dep["source"], dep["used_scheduled_time"]
