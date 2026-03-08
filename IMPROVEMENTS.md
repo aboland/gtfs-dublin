@@ -1,161 +1,256 @@
-# GTFS Dublin — Issues & Suggested Improvements
+# GTFS Dublin — Delay Tracking Implementation Plan
 
-## Critical: Security
+This document describes how to set up and operationalise historical delay tracking for Dublin bus stops. The tracking system uses a lightweight SQLite database, scoped to specific stops and routes to control storage size.
 
-### 1. API Key Hardcoded in Source Code
-**File:** `gtfs_core/transport_api.py` (bottom `__main__` block)
+---
+
+## Overview
+
+The delay tracking system periodically snapshots real-time delay data from the NTA GTFS-RT feed and stores it in SQLite. This enables:
+- Historical delay analysis per route and stop
+- Average/max delay statistics over configurable time windows
+- Trend detection for commute planning
+- Data for Home Assistant sensors showing delay patterns
+
+**Storage is bounded by design:**
+- Only tracks delays at stops/routes you configure
+- Automatic purge of records older than N days
+- Estimated ~2-3 MB/month for 2 stops, all routes, sampled every 5 minutes
+
+---
+
+## 1. Configuration
+
+### Environment Variables
+
+Add these to your `.env` file (all optional):
+
+```env
+# Path to the SQLite database (default: delay_history.db)
+DELAY_DB_PATH=/app/data/delay_history.db
+
+# Stops to track delays for (reuses STOPS if not set)
+DELAY_TRACKED_STOPS=8220DB002437,8220DB002438
+
+# Routes to track (optional — if unset, tracks all routes at tracked stops)
+DELAY_TRACKED_ROUTES=
+
+# How often to record delays in seconds (default: 300 = 5 minutes)
+DELAY_RECORD_INTERVAL=300
+
+# How many days of history to keep (default: 30)
+DELAY_KEEP_DAYS=30
+```
+
+### Docker Volume
+
+To persist the database across container restarts, mount a volume in `docker-compose.yml`:
+
+```yaml
+services:
+  transport-api:
+    volumes:
+      - ./GTFS_Realtime:/app/GTFS_Realtime:ro
+      - ./data:/app/data  # Persistent storage for delay database
+```
+
+---
+
+## 2. API Methods
+
+The `TransportAPI` class provides these methods:
+
+### Initialisation
 ```python
-api_key=os.environ.get("TRANSPORT_API_KEY", "309f2a3c4c8d486a8b23bd6037e98bb0")
-```
-A real API key is used as a default fallback. This key is committed to version control. **Remove the default value** and rely solely on the environment variable. If the key is live, rotate it immediately.
-
-### 2. `.env` File Committed to Repository
-**File:** `mcp-server/.env` contains the actual API key and stop IDs. This file is not covered by `.gitignore` (only `/.env` at root is ignored). Add `mcp-server/.env` to `.gitignore` and remove it from version history.
-
-### 3. Missing `.env.example`
-The README references `cp .env.example .env` but no `.env.example` file exists. Create one with placeholder values:
-```
-TRANSPORT_API_KEY=your-api-key-here
-STOPS=stop_id_1,stop_id_2
+api.init_delay_tracking(
+    db_path="/app/data/delay_history.db",
+    tracked_stops=["8220DB002437", "8220DB002438"],
+    tracked_routes=None,  # None = all routes at tracked stops
+)
 ```
 
----
-
-## High Priority: Dead / Broken Code
-
-### 4. Incomplete Refactor — Stub Classes Never Used
-`VehicleDataFetcher`, `GTFSQueries`, and `DepartureService` at the top of `transport_api.py` were created as part of a decomposition effort, but their methods are stubs (`pass`). Meanwhile, `TransportAPI` still contains all the actual logic. Either:
-- **Complete the refactor**: move logic into the sub-components and have `TransportAPI` delegate, or
-- **Remove the stubs** to avoid confusion.
-
-### 5. Orphaned Methods on `TransportAPI`
-`TransportAPI` defines `_fetch_trip_updates()` and `_fetch_vehicle_positions()` that call `self._cached_fetch(...)`, but `TransportAPI` does not have a `_cached_fetch` method — only `VehicleDataFetcher` does. These methods would crash if called directly. They appear to be leftover copies from before the `VehicleDataFetcher` extraction.
-
-### 6. `get_departures_for_stops` Returns JSON String
-This method returns `json.dumps(departures, ...)` (a string), but `get_combined_departures_and_schedule` immediately `json.loads()` it back into a dict. This unnecessary serialisation round-trip adds overhead and makes the internal API awkward. Return the list directly and serialise only at the boundary (FastAPI endpoint / MCP tool).
-
-### 7. `temp_trip_updates.txt` Checked In
-This appears to be a debug artifact. Remove it from the repository and add it to `.gitignore`.
-
----
-
-## Medium Priority: MCP Server
-
-### 8. `format_departures_output` Tool Is Unusable for AI Agents
-This MCP tool calls `print()` and returns the static string `"Departures formatted and printed to console."`. An AI agent consuming this tool via MCP gets no useful data. It should **return the formatted text as a string** instead of printing it.
-
-### 9. `get_departures_for_stops` Tool Returns Raw JSON String
-All other MCP tools return Pydantic models for structured output, but this one returns a raw JSON string (`str`). Convert it to return `list[DepartureInfo]` for consistency and better schema validation.
-
-### 10. No Error Handling in MCP Tools
-All MCP tool functions call `get_api()` and `api.*` without try/except. If the API key is missing, GTFS data isn't loaded, or the upstream API is down, the agent receives a raw Python traceback. Wrap tool bodies in try/except and return clear error messages.
-
-### 11. Fragile `sys.path` Manipulation
-`mcp-server/main.py` uses `sys.path.insert(0, ...)` to find the parent package. Since the MCP server already declares `gtfs-dublin` as a workspace dependency in its `pyproject.toml`, this shouldn't be necessary when running via `uv run`. Remove the path hack and rely on the proper workspace resolution.
-
-### 12. Consider Adding MCP Resources and Prompts
-The MCP server only exposes tools. Adding MCP resources (e.g., `stop://{stop_id}` for stop info, `route://{route_id}` for route info) and prompts (e.g., a "departure summary" prompt) would give AI agents richer context and more natural interaction patterns, per MCP best practices.
-
----
-
-## Medium Priority: Performance
-
-### 13. Re-reading CSV Files on Every Request
-`get_scheduled_times_for_route_stop()` opens and reads `trips.txt` and `calendar.txt` from disk on every call. These files only change when GTFS data is updated (monthly). Load them once during `GTFSDataLoader` initialization and store them in memory alongside the other lookups.
-
-### 14. O(n) Linear Scan for Trip→Route Lookup
-In both `VehicleDataFetcher._fetch_vehicle_positions()` and `TransportAPI.get_vehicles_near_location()`, when the `trip_id_to_info` lookup isn't available, the code iterates over the entire `trip_headsign_lookup` dict to find a matching `trip_id`:
+### Recording (call periodically)
 ```python
-for (t_id, r_id), h in self.trip_headsign_lookup.items():
-    if t_id == tid:
-        ...
-        break
+count = api.record_delays()  # Returns number of records inserted
 ```
-Build a `trip_id → route_id` index once during initialization to make this O(1).
 
-### 15. `departure_lookup` Loads All Stop Times
-While `stop_times_by_stop` is filtered by `focus_stops`, the `departure_lookup` dict is populated for every trip/stop in `stop_times.txt` — the largest GTFS file. Consider applying the same filter, or loading it lazily.
+### Querying
+```python
+# Raw history (last 7 days, up to 500 records)
+history = api.get_delay_history(stop_id="8220DB002437", route_id=None, days=7, limit=500)
+
+# Aggregated stats
+summary = api.get_delay_summary(stop_id="8220DB002437", days=7)
+# Returns: [{"route_id": "...", "route_short_name": "15", "stop_id": "...",
+#            "sample_count": 42, "avg_delay": 85.3, "max_delay": 300, "min_delay": -10}]
+```
+
+### Cleanup
+```python
+deleted = api.purge_old_delays(keep_days=30)
+```
 
 ---
 
-## Low Priority: Code Quality & Project Config
+## 3. REST API Endpoints
 
-### 16. Redundant `use_stop_code` Handling
-In `get_combined_departures_and_schedule`, stop codes are mapped to stop IDs at the start, but then `get_scheduled_times_for_route_stop(stop_id=sid, use_stop_code=use_stop_code)` is called with the flag still set. This could cause double-mapping. After mapping once at the caller, pass `use_stop_code=False` downstream.
+Once tracking is enabled:
 
-### 17. Duplicate Vehicle Enrichment Logic
-The vehicle enrichment code (adding `route_short_name`, `trip_headsign`) is duplicated almost identically in:
-- `VehicleDataFetcher._fetch_vehicle_positions()`
-- `TransportAPI._fetch_vehicle_positions()` (dead code)
-- `TransportAPI.get_vehicles_near_location()`
+| Endpoint | Description |
+|---|---|
+| `GET /delays/history?stop_id=...&route_id=...&days=7&limit=500` | Raw delay records |
+| `GET /delays/summary?stop_id=...&route_id=...&days=7` | Aggregated delay stats |
 
-Since `_fetch_vehicle_positions()` already enriches vehicles, `get_vehicles_near_location()` re-enriches them redundantly. Consolidate to a single enrichment pass.
+---
 
-### 18. `pyproject.toml` Placeholder Author
-```toml
-authors = [{name = "Your Name", email = "you@example.com"}]
-```
-Update with actual author information.
+## 4. Implementation Steps
 
-### 19. Overlapping Formatters: `black` + `ruff`
-Both `black` and `ruff` are configured. Ruff now includes a formatter (`ruff format`) that can replace black entirely. Consider dropping black to simplify the toolchain.
+### Step 1: Add Background Recording to the API Server
 
-### 20. Very Permissive `mypy` Config
-Most strictness options are disabled (`disallow_untyped_defs = false`, etc.). Gradually enabling these would catch real bugs — especially around the `None` vs missing-key patterns throughout the codebase.
+Update `gtfs_dublin/transport_api_server.py` to call `record_delays()` periodically using a FastAPI background task:
 
-### 21. README Markdown Issues
-- The code block showing `download_latest_gtfs()` has mismatched fencing (extra triple backticks)
-- The repository URL is `https://github.com/yourusername/gtfs-dublin.git` — a placeholder
-
-### 22. No Proper Test Suite
-Only `mcp-server/test_setup.py` exists — a manual integration check script. There are no pytest unit tests despite pytest being in `dev` dependencies. Key candidates for testing:
-- `GTFSDataLoader` parsing logic
-- `_haversine_distance` calculations
-- `_add_delay_to_time` / `_seconds_until_departure` time math
-- `filter_schedule_by_time_window` filtering logic
-- `get_combined_departures_and_schedule` merging logic
-
-### 23. Docker — MCP Server Unnecessary `depends_on`
-In `docker-compose.yml`, `mcp-server` depends on `transport-api`, but they are independent services that both access GTFS data directly. Remove the dependency unless there's a specific startup ordering need.
-
-### 24. Global Mutable State in MCP Server
-The `api` global variable with lazy initialization (`get_api()`) isn't thread-safe. Use FastMCP's lifespan context manager to initialize the `TransportAPI` instance once at startup:
 ```python
+import asyncio
 from contextlib import asynccontextmanager
 
 @asynccontextmanager
-async def lifespan(server):
-    api = TransportAPI(...)
-    yield {"api": api}
+async def lifespan(app: FastAPI):
+    # Initialise delay tracking on startup
+    tracked_stops = os.getenv("DELAY_TRACKED_STOPS", os.getenv("STOPS", ""))
+    stops = [s.strip() for s in tracked_stops.split(",") if s.strip()]
+    tracked_routes_env = os.getenv("DELAY_TRACKED_ROUTES", "")
+    routes = [r.strip() for r in tracked_routes_env.split(",") if r.strip()] or None
+
+    if stops:
+        api.init_delay_tracking(
+            db_path=os.getenv("DELAY_DB_PATH", "delay_history.db"),
+            tracked_stops=stops,
+            tracked_routes=routes,
+        )
+        # Start background recording loop
+        task = asyncio.create_task(_record_loop())
+    yield
+    if stops:
+        task.cancel()
+
+async def _record_loop():
+    interval = int(os.getenv("DELAY_RECORD_INTERVAL", "300"))
+    while True:
+        try:
+            count = api.record_delays()
+            logger.info("Recorded %d delay entries", count)
+        except Exception:
+            logger.exception("Error recording delays")
+        await asyncio.sleep(interval)
+
+app = FastAPI(lifespan=lifespan)
+```
+
+### Step 2: Add Periodic Purge (cron or startup)
+
+Option A — Run purge on startup (simplest):
+```python
+# Inside lifespan, after init_delay_tracking:
+keep_days = int(os.getenv("DELAY_KEEP_DAYS", "30"))
+api.purge_old_delays(keep_days=keep_days)
+```
+
+Option B — Cron job on the host:
+```sh
+# /etc/cron.d/gtfs-purge-delays
+0 3 * * 0 curl -s http://localhost:8000/delays/purge > /dev/null
+```
+
+### Step 3: Mount Persistent Volume
+
+In `docker-compose.yml`, add the data volume so the SQLite DB survives container restarts:
+```yaml
+volumes:
+  - ./data:/app/data
+```
+
+Create the directory on the host:
+```sh
+mkdir -p data
+```
+
+### Step 4: Deploy
+
+```sh
+git pull origin main
+docker compose build
+docker compose up -d
 ```
 
 ---
 
-## Summary Table
+## 5. Home Assistant Integration
 
-| # | Severity | Category | Summary |
-|---|----------|----------|---------|
-| 1 | **Critical** | Security | API key hardcoded in source |
-| 2 | **Critical** | Security | `.env` with real key committed |
-| 3 | **High** | Config | Missing `.env.example` |
-| 4 | **High** | Code | Stub classes never completed |
-| 5 | **High** | Bug | Orphaned methods reference missing `_cached_fetch` |
-| 6 | **High** | Design | Unnecessary JSON round-trip |
-| 7 | **Medium** | Hygiene | Temp file in repo |
-| 8 | **Medium** | MCP | `format_departures_output` prints instead of returns |
-| 9 | **Medium** | MCP | Inconsistent return types across tools |
-| 10 | **Medium** | MCP | No error handling in tools |
-| 11 | **Medium** | MCP | Fragile `sys.path` hack |
-| 12 | **Medium** | MCP | No resources or prompts |
-| 13 | **Medium** | Perf | CSV re-read on every request |
-| 14 | **Medium** | Perf | O(n) trip→route lookups |
-| 15 | **Medium** | Perf | Unfiltered `departure_lookup` |
-| 16 | **Low** | Bug | Double `use_stop_code` mapping |
-| 17 | **Low** | Code | Duplicated enrichment logic |
-| 18 | **Low** | Config | Placeholder author |
-| 19 | **Low** | Tooling | Redundant `black` + `ruff` |
-| 20 | **Low** | Tooling | Permissive mypy config |
-| 21 | **Low** | Docs | README markdown/placeholder issues |
-| 22 | **Low** | Testing | No pytest test suite |
-| 23 | **Low** | Docker | Unnecessary service dependency |
-| 24 | **Low** | MCP | Global mutable state / thread safety |
+### Average Delay Sensor
+
+```yaml
+rest:
+  - resource: http://<server-ip>:8000/delays/summary?stop_id=8220DB002437&days=7
+    scan_interval: 3600  # Update hourly
+    sensor:
+      - name: "Bus Delay Stats"
+        value_template: "{{ value_json | length }}"
+        json_attributes_path: "$[0]"
+        json_attributes:
+          - route_short_name
+          - avg_delay
+          - max_delay
+          - sample_count
+```
+
+### Template Sensor for Display
+
+```yaml
+template:
+  - sensor:
+      - name: "Avg Bus Delay - Main Street"
+        state: >
+          {% set avg = state_attr('sensor.bus_delay_stats', 'avg_delay') %}
+          {% if avg is not none %}
+            {{ (avg / 60) | round(1) }}
+          {% else %}
+            Unknown
+          {% endif %}
+        unit_of_measurement: "min"
+        icon: mdi:clock-alert-outline
+```
+
+---
+
+## 6. Storage Estimates
+
+| Stops | Sample Interval | Routes | Days Kept | Est. Rows | Est. Size |
+|-------|----------------|--------|-----------|-----------|-----------|
+| 2     | 5 min          | All    | 30        | ~29,000   | ~2-3 MB   |
+| 2     | 5 min          | 3      | 30        | ~8,000    | ~1 MB     |
+| 5     | 5 min          | All    | 30        | ~72,000   | ~6-7 MB   |
+| 2     | 5 min          | All    | 90        | ~87,000   | ~8 MB     |
+
+Storage is dominated by the number of tracked stops. Limiting `tracked_routes` is the most effective way to reduce size.
+
+---
+
+## 7. Database Schema
+
+```sql
+CREATE TABLE delay_records (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    recorded_at TEXT NOT NULL,      -- ISO timestamp
+    stop_id TEXT NOT NULL,
+    route_id TEXT NOT NULL,
+    route_short_name TEXT,
+    trip_id TEXT NOT NULL,
+    scheduled_time TEXT,
+    delay_seconds INTEGER,         -- Positive = late, negative = early
+    UNIQUE(recorded_at, stop_id, trip_id)
+);
+
+CREATE INDEX idx_delay_stop_route ON delay_records(stop_id, route_id, recorded_at);
+```
+
+The `UNIQUE` constraint prevents duplicate entries if `record_delays()` is called more frequently than departures change.
