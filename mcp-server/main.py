@@ -5,6 +5,7 @@ MCP Server for GTFS Dublin Transport API
 
 import logging
 import os
+import secrets
 from contextlib import asynccontextmanager
 from typing import Any
 
@@ -16,10 +17,51 @@ load_dotenv()
 # All imports after environment setup
 from mcp.server.fastmcp import FastMCP  # noqa: E402
 from pydantic import BaseModel, Field  # noqa: E402
+from starlette.applications import Starlette  # noqa: E402
+from starlette.middleware import Middleware  # noqa: E402
+from starlette.middleware.base import BaseHTTPMiddleware  # noqa: E402
+from starlette.requests import Request  # noqa: E402
+from starlette.responses import JSONResponse  # noqa: E402
+from starlette.routing import Mount, Route  # noqa: E402
+import uvicorn  # noqa: E402
 
 from gtfs_core import TransportAPI  # noqa: E402
 
 logger = logging.getLogger(__name__)
+
+
+class BearerAuthMiddleware(BaseHTTPMiddleware):
+    """Protect the HTTP MCP endpoint with a shared bearer token when configured."""
+
+    async def dispatch(self, request: Request, call_next):
+        expected_token = os.environ.get("MCP_AUTH_TOKEN")
+        if not expected_token or request.url.path == "/health":
+            return await call_next(request)
+
+        authorization = request.headers.get("authorization")
+        if not authorization:
+            return JSONResponse(
+                {"detail": "Missing Authorization header"},
+                status_code=401,
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+
+        scheme, _, provided_token = authorization.partition(" ")
+        if scheme.lower() != "bearer" or not provided_token:
+            return JSONResponse(
+                {"detail": "Invalid Authorization header"},
+                status_code=401,
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+
+        if not secrets.compare_digest(provided_token, expected_token):
+            return JSONResponse(
+                {"detail": "Invalid bearer token"},
+                status_code=401,
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+
+        return await call_next(request)
 
 
 # Pydantic models for structured output
@@ -128,6 +170,22 @@ def get_api() -> TransportAPI:
             "TransportAPI not initialized. Server may still be starting up."
         )
     return _api
+
+
+async def health_check(_: Request) -> JSONResponse:
+    """Lightweight health endpoint for reverse proxies and uptime checks."""
+    return JSONResponse({"status": "ok"})
+
+
+def create_http_app() -> Starlette:
+    """Create the authenticated HTTP application for the MCP server."""
+    return Starlette(
+        routes=[
+            Route("/health", health_check),
+            Mount("/", app=mcp.streamable_http_app()),
+        ],
+        middleware=[Middleware(BearerAuthMiddleware)],
+    )
 
 
 # Create MCP server
@@ -403,6 +461,10 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     if args.transport == "streamable-http":
-        mcp.run(transport="streamable-http")
+        uvicorn.run(
+            create_http_app(),
+            host="0.0.0.0",
+            port=8001,
+        )
     else:
         mcp.run()

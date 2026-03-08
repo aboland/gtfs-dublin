@@ -24,6 +24,7 @@ This MCP server exposes the following tools for accessing Dublin transport data:
 
 - `TRANSPORT_API_KEY`: Your API key for accessing transport data
 - `GTFS_DIR`: Path to GTFS data directory (defaults to `./GTFS_Realtime`)
+- `MCP_AUTH_TOKEN`: Optional bearer token required for HTTP access to the MCP server
 
 ## Running the Server
 
@@ -42,6 +43,14 @@ python main.py
 uv run python main.py --transport streamable-http
 ```
 
+When `MCP_AUTH_TOKEN` is set, the HTTP server requires:
+
+```http
+Authorization: Bearer <your-token>
+```
+
+The `/health` endpoint remains unauthenticated so reverse proxies and uptime checks can verify the service.
+
 ## Installation in Claude Desktop
 
 Add to your Claude Desktop configuration:
@@ -58,6 +67,21 @@ Add to your Claude Desktop configuration:
     }
   }
 }
+```
+
+## Securing a Public Deployment
+
+If you expose the HTTP transport on the public Internet, set `MCP_AUTH_TOKEN` and place the service behind HTTPS on a reverse proxy. For example:
+
+```bash
+export MCP_AUTH_TOKEN="$(openssl rand -hex 32)"
+uv run python main.py --transport streamable-http
+```
+
+Then configure your proxy or client to send:
+
+```http
+Authorization: Bearer <your-token>
 ```
 
 ## API Key

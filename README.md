@@ -117,10 +117,13 @@ The MCP server provides AI-accessible tools for transport data:
 - `get_service_alerts` — Get active service alerts
 - `search_stops` — Search stops by name, code, or ID
 
+If `MCP_AUTH_TOKEN` is set, HTTP clients must send `Authorization: Bearer <token>` when connecting to the MCP server. This is recommended for any Internet-exposed deployment.
+
 ### Environment Variables
 - `TRANSPORT_API_KEY` — Your API key for the National Transport API (required)
 - `STOPS` — Comma-separated list of stop IDs to focus on (optional)
 - `GTFS_DIR` — Directory for GTFS files (default: `GTFS_Realtime`)
+- `MCP_AUTH_TOKEN` — Optional bearer token required by the MCP HTTP endpoint when set
 - `DELAY_DB_PATH` — Path to SQLite database for delay tracking (default: `delay_history.db`)
 - `DELAY_TRACKING_ENABLED` — Enable background delay recording in the API server (`0`/`1`, default: `0`)
 - `DELAY_TRACKED_STOPS` — Comma-separated stop IDs to record delays for (defaults to `STOPS`)

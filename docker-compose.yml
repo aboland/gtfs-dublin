@@ -47,6 +47,7 @@ services:
       - TRANSPORT_API_KEY=${TRANSPORT_API_KEY}
       - STOPS=${STOPS}
       - GTFS_DIR=/app/GTFS_Realtime
+      - MCP_AUTH_TOKEN=${MCP_AUTH_TOKEN:-}
     ports:
       - "8001:8001"
     volumes:
