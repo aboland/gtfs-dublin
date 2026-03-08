@@ -80,6 +80,8 @@ make up-mcp      # Run only the MCP server
 
 ### API Endpoints
 - `/departures?stops=STOP_ID1,STOP_ID2` — Get combined real-time and scheduled departures for given stop IDs
+- `/departures?stops=1234,5678&use_stop_code=true` — Same, but using the 4-digit codes displayed at physical bus stops
+- `/departures/route/{route_short_name}?stop=STOP_ID` — Get departures for a specific route (e.g. `15`, `16A`) at a stop
 - `/health` — Health check endpoint
 
 ### MCP Server

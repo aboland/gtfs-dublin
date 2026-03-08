@@ -1,6 +1,6 @@
 import os
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query
 
 from gtfs_core import TransportAPI
 
@@ -21,9 +21,16 @@ api = TransportAPI(api_key=API_KEY, focus_stops=get_env_stops())
 
 
 @app.get("/departures")
-def departures(stops: str | None = None):
+def departures(
+    stops: str | None = None,
+    use_stop_code: bool = Query(
+        default=False,
+        description="If true, treat stop values as stop codes (displayed at physical stops) instead of GTFS stop IDs",
+    ),
+):
     """
     Returns combined departures for the given stops (comma-separated), or the env stops if not provided.
+    Set use_stop_code=true to pass the 4-digit codes shown at bus stops instead of GTFS stop IDs.
     """
     stop_ids = [
         s.strip()
@@ -31,13 +38,46 @@ def departures(stops: str | None = None):
         if s.strip()
     ]
     if not stop_ids:
-        # No stops provided and no default in env
         raise HTTPException(status_code=400, detail="No stop IDs provided")
     try:
-        result = api.get_combined_departures_and_schedule(stop_ids)
+        result = api.get_combined_departures_and_schedule(
+            stop_ids, use_stop_code=use_stop_code
+        )
         return result
     except RuntimeError as e:
-        # Upstream fetch failure or other runtime issue
+        raise HTTPException(status_code=503, detail=str(e)) from e
+
+
+@app.get("/departures/route/{route_short_name}")
+def departures_by_route(
+    route_short_name: str,
+    stop: str = Query(description="Stop ID (or stop code if use_stop_code=true)"),
+    use_stop_code: bool = Query(default=False, description="Treat stop as a stop code"),
+):
+    """
+    Get scheduled and real-time departures for a specific route at a stop.
+    Use the route's short name (e.g. '15', '16A') as shown on the bus.
+    """
+    # Resolve route short name to route_id
+    route_id = None
+    for rid, name in api.route_short_name_lookup.items():
+        if name.lower() == route_short_name.lower():
+            route_id = rid
+            break
+    if route_id is None:
+        raise HTTPException(status_code=404, detail=f"Route '{route_short_name}' not found")
+
+    try:
+        combined = api.get_combined_departures_and_schedule(
+            [stop], use_stop_code=use_stop_code
+        )
+        filtered = [
+            dep for dep in combined.get("live", [])
+            if dep.get("route_id") == route_id
+               or dep.get("route_short_name", "").lower() == route_short_name.lower()
+        ]
+        return {"timestamp": combined["timestamp"], "live": filtered}
+    except RuntimeError as e:
         raise HTTPException(status_code=503, detail=str(e)) from e
 
 
