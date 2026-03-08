@@ -8,7 +8,7 @@
 set -e
 
 # Configuration
-PROJECT_DIR="$HOME/gtfs-dublin"
+PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 LOG_FILE="$PROJECT_DIR/gtfs-update.log"
 TIMESTAMP=$(date '+%Y-%m-%d %H:%M:%S')
 
