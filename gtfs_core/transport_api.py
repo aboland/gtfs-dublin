@@ -692,10 +692,11 @@ class TransportAPI:
 
 
     def get_combined_departures_and_schedule(
-        self, stop_ids, window_future=60 * 60, use_stop_code=False
+        self, stop_ids, window_future=2 * 60 * 60, use_stop_code=False
     ):
         """
         Returns a dict with the current timestamp and a 'live' key containing a flat list of all departures (with all info in each entry).
+        Includes the next two hours by default, with scheduled fallback where needed.
         """
         from copy import deepcopy
 
