@@ -2,6 +2,7 @@ import logging
 import os
 import sqlite3
 from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 
 import requests
 from google.transit import gtfs_realtime_pb2
@@ -10,6 +11,8 @@ from .formatting import DeparturesFormatter
 from .gtfs_loader import GTFSDataError, GTFSDataLoader
 
 logger = logging.getLogger(__name__)
+
+DUBLIN_TIMEZONE = ZoneInfo("Europe/Dublin")
 
 
 class TransportAPI:
@@ -55,15 +58,26 @@ class TransportAPI:
         self.session = session
 
     # --- Utility Methods ---
-    def _add_delay_to_time(self, time_str, delay_seconds):
-        t = datetime.strptime(time_str, "%H:%M:%S").time()
-        today = datetime.today().date()
-        dt = datetime.combine(today, t)
+    @staticmethod
+    def _now():
+        """Return the current Dublin wall-clock time for GTFS calculations."""
+        return datetime.now(DUBLIN_TIMEZONE).replace(tzinfo=None)
+
+
+    def _add_delay_to_time(self, time_str, delay_seconds, service_date=None):
+        """Apply a realtime delay to a GTFS time on its operating service day."""
+        hours, minutes, seconds = map(int, time_str.split(":"))
+        if not 0 <= minutes < 60 or not 0 <= seconds < 60 or hours < 0:
+            raise ValueError(f"Invalid GTFS time: {time_str}")
+        service_date = service_date or self._now().date()
+        today = datetime.combine(service_date, datetime.min.time())
+        # GTFS permits times beyond 24:00:00 for journeys crossing midnight.
+        dt = today + timedelta(hours=hours, minutes=minutes, seconds=seconds)
         new_time = dt + timedelta(seconds=delay_seconds)
         return new_time.strftime("%H:%M:%S"), new_time
 
     def _seconds_until_departure(self, expected_departure_dt):
-        now = datetime.now().replace(microsecond=0)
+        now = self._now().replace(microsecond=0)
         delta = expected_departure_dt - now
         return int(delta.total_seconds())
 
@@ -344,6 +358,68 @@ class TransportAPI:
                     break
         return results
 
+    def _updates_for_requested_stops(self, trip_update, stop_ids):
+        """Carry sparse GTFS-RT delay updates forward to requested stops."""
+        updates = list(trip_update.stop_time_update)
+        trip_id = trip_update.trip.trip_id
+        targets = {}
+        for stop_id in stop_ids:
+            for row in self.stop_times_by_stop.get(stop_id, []):
+                if row['trip_id'] == trip_id:
+                    targets[(stop_id, int(row['stop_sequence']))] = row
+        emitted = set()
+        for update in updates:
+            stop_id = update.stop_id
+            if not stop_id and update.HasField('stop_sequence'):
+                stop_id = next((sid for sid, seq in targets if seq == update.stop_sequence), '')
+            if stop_id in stop_ids:
+                normalized = gtfs_realtime_pb2.TripUpdate.StopTimeUpdate()
+                normalized.CopyFrom(update)
+                normalized.stop_id = stop_id
+                if not normalized.HasField('stop_sequence'):
+                    matches = [seq for sid, seq in targets if sid == stop_id]
+                    if len(matches) == 1:
+                        normalized.stop_sequence = matches[0]
+                emitted.add((stop_id, normalized.stop_sequence))
+                yield normalized, False
+        for stop_id, sequence in targets:
+            if (stop_id, sequence) in emitted:
+                continue
+            delay = trip_update.delay if trip_update.HasField('delay') else None
+            for update in updates:
+                if not update.HasField('stop_sequence'):
+                    # Do not guess ordering when an upstream stop has no sequence
+                    # and is not part of the loaded timetable lookup.
+                    delay = None
+                    continue
+                if update.stop_sequence >= sequence:
+                    break
+                relationship = update.schedule_relationship
+                if relationship == gtfs_realtime_pb2.TripUpdate.StopTimeUpdate.SKIPPED:
+                    continue
+                if relationship == gtfs_realtime_pb2.TripUpdate.StopTimeUpdate.NO_DATA:
+                    delay = None
+                    continue
+                delay = None
+                for event in (update.departure, update.arrival):
+                    if event.HasField('time'):
+                        scheduled = self.departure_lookup.get((trip_id, update.stop_id))
+                        if scheduled and trip_update.trip.start_date:
+                            service_date = datetime.strptime(trip_update.trip.start_date, '%Y%m%d').date()
+                            _, scheduled_dt = self._add_delay_to_time(scheduled, 0, service_date)
+                            delay = int(event.time - scheduled_dt.replace(tzinfo=DUBLIN_TIMEZONE).timestamp())
+                        break
+                    if event.HasField('delay'):
+                        delay = event.delay
+                        break
+            if delay is not None:
+                propagated = gtfs_realtime_pb2.TripUpdate.StopTimeUpdate()
+                propagated.stop_id = stop_id
+                propagated.stop_sequence = sequence
+                propagated.departure.delay = delay
+                yield propagated, True
+
+
     def get_departures_for_stops(self, stop_ids, use_stop_code=False):
         """
         Get departures for a list of stop_ids or stop_codes.
@@ -365,7 +441,7 @@ class TransportAPI:
                         trip.schedule_relationship
                     )
                 )
-                for stu in entity.trip_update.stop_time_update:
+                for stu, propagated in self._updates_for_requested_stops(entity.trip_update, stop_ids):
                     if stu.stop_id in stop_ids:
                         stop_schedule_relationship = gtfs_realtime_pb2.TripUpdate.StopTimeUpdate.ScheduleRelationship.Name(
                             stu.schedule_relationship
@@ -380,11 +456,12 @@ class TransportAPI:
                         scheduled_departure_time = self.departure_lookup.get(
                             dept_key, ""
                         )
-                        delay = (
-                            stu.departure.delay
-                            if stu.departure.HasField("delay")
-                            else None
-                        )
+                        event = stu.departure
+                        if not event.HasField('time') and not event.HasField('delay'):
+                            event = stu.arrival
+                        delay = event.delay if event.HasField('delay') else None
+                        if stop_schedule_relationship == 'NO_DATA':
+                            delay = None
                         # Parse start_date and start_time
                         start_date = str(trip.start_date)
                         start_time_str = str(trip.start_time)
@@ -399,9 +476,25 @@ class TransportAPI:
                                 arrival_str = f"{start_date} {start_time_str}"
                         else:
                             arrival_str = "N/A"
-                        if delay is not None and scheduled_departure_time:
+                        service_date = None
+                        if start_date:
+                            try:
+                                service_date = datetime.strptime(
+                                    start_date, "%Y%m%d"
+                                ).date()
+                            except ValueError:
+                                pass
+                        if event.HasField('time') and stop_schedule_relationship != 'NO_DATA':
+                            expected_departure_dt = datetime.fromtimestamp(event.time, DUBLIN_TIMEZONE).replace(tzinfo=None)
+                            expected_departure_str = expected_departure_dt.strftime('%H:%M:%S')
+                            seconds_left = self._seconds_until_departure(expected_departure_dt)
+                        elif delay is not None and scheduled_departure_time:
                             expected_departure_str, expected_departure_dt = (
-                                self._add_delay_to_time(scheduled_departure_time, delay)
+                                self._add_delay_to_time(
+                                    scheduled_departure_time,
+                                    delay,
+                                    service_date=service_date,
+                                )
                             )
                             seconds_left = self._seconds_until_departure(
                                 expected_departure_dt
@@ -430,6 +523,7 @@ class TransportAPI:
                             ),
                             "scheduled_departure_time": scheduled_departure_time,
                             "delay": delay,
+                            "prediction_source": "propagated_delay" if propagated else "stop_update",
                             "expected_departure_time": expected_departure_str,
                             "time_left": seconds_left,
                             "start_time": trip.start_time,
@@ -457,7 +551,7 @@ class TransportAPI:
                                 dep["vehicle_distance_to_stop_m"] = None
                             # Add seconds since vehicle updated
                             try:
-                                now = datetime.now().timestamp()
+                                now = datetime.now(DUBLIN_TIMEZONE).timestamp()
                                 vehicle_ts = vehicle_info["timestamp"]
                                 dep["vehicle_seconds_since_update"] = int(
                                     now - vehicle_ts
@@ -569,6 +663,34 @@ class TransportAPI:
         filtered.sort(key=lambda x: x["seconds_until"])
         return filtered
 
+    def _cancelled_trip_stops(self, feed, stop_ids):
+        """Retain cancellations that must not be replaced by timetable values."""
+        cancelled_trips = set()
+        skipped_stops = set()
+        if feed is None:
+            return cancelled_trips, skipped_stops
+        requested = set(stop_ids)
+        for entity in feed.entity:
+            if not entity.HasField('trip_update'):
+                continue
+            update = entity.trip_update
+            trip_id = update.trip.trip_id
+            relationship = gtfs_realtime_pb2.TripDescriptor.ScheduleRelationship.Name(update.trip.schedule_relationship)
+            if relationship in {'CANCELED', 'DELETED'}:
+                cancelled_trips.add(trip_id)
+            for stop in update.stop_time_update:
+                if stop.schedule_relationship != gtfs_realtime_pb2.TripUpdate.StopTimeUpdate.SKIPPED:
+                    continue
+                if stop.stop_id in requested:
+                    skipped_stops.add((trip_id, stop.stop_id))
+                elif not stop.stop_id and stop.HasField('stop_sequence'):
+                    for sid in requested:
+                        for row in self.stop_times_by_stop.get(sid, []):
+                            if row['trip_id'] == trip_id and int(row['stop_sequence']) == stop.stop_sequence:
+                                skipped_stops.add((trip_id, sid))
+        return cancelled_trips, skipped_stops
+
+
     def get_combined_departures_and_schedule(
         self, stop_ids, window_future=60 * 60, use_stop_code=False
     ):
@@ -583,7 +705,7 @@ class TransportAPI:
         else:
             stop_ids = stop_ids
 
-        now = datetime.now()
+        now = self._now()
         window_past = 5 * 60
         realtime = [
             dep
@@ -594,6 +716,10 @@ class TransportAPI:
                 window_future=window_future,
             )
         ]
+        # Preserve raw cancellation status before merging timetable entries.
+        cancelled_trips, skipped_stops = self._cancelled_trip_stops(
+            getattr(self, '_trip_updates_cache', None), stop_ids
+        )
         rt_index = {(d["trip_id"], d["stop_id"]): d for d in realtime}
         all_entries = []
         for sid in stop_ids:
@@ -616,7 +742,22 @@ class TransportAPI:
                 entry["stop_id"] = sid
                 entry["stop_code"] = stop_code
                 entry["stop_name"] = stop_name
-                if key in rt_index:
+                if entry['trip_id'] in cancelled_trips or key in skipped_stops:
+                    dep = deepcopy(entry)
+                    dep.update({
+                        'source': 'realtime',
+                        'cancelled': True,
+                        'cancellation_reason': 'trip_cancelled' if entry['trip_id'] in cancelled_trips else 'stop_skipped',
+                        'timing_status': 'cancelled',
+                        # Retain the scheduled position in the departure list,
+                        # without representing it as an expected arrival.
+                        'time_left': entry.get('seconds_until'),
+                        'scheduled_departure_time': entry.get('departure_time') or entry.get('arrival_time'),
+                        'expected_departure_time': None,
+                        'used_scheduled_time': True,
+                    })
+                    all_entries.append(dep)
+                elif key in rt_index:
                     rt_index[key]["stop_id"] = sid
                     rt_index[key]["stop_code"] = stop_code
                     rt_index[key]["stop_name"] = stop_name
